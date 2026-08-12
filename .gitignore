@@ -1,0 +1,30 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Private research inputs and generated working data
+recordings/*
+!recordings/.gitkeep
+transcripts/*
+!transcripts/.gitkeep
+data/*
+!data/.gitkeep
+exports/*
+!exports/.gitkeep
+
+# Saved sessions and generated exports anywhere in the repository
+*.session.json
+*.xlsx
+
+# Python and editor/OS artifacts
+__pycache__/
+*.py[cod]
+.DS_Store
+.idea/
+.vscode/
+
+# Backups of nested Git metadata
+.git.standalone-backup/

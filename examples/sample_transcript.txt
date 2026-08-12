@@ -1,0 +1,6 @@
+Interviewer: Can you walk me through how your team reviews articles?
+Participant: We usually split the reading across two people, then compare notes in a shared document.
+Interviewer: What makes that process difficult?
+Participant: The hardest part is noticing when we used different labels for the same idea.
+Interviewer: What would make the coding tool useful?
+Participant: I would want quick topic editing, clear exports, and a way to return to the same session tomorrow.

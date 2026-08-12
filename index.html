@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Local Qual Coding Desk</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-block">
+          <h1>Local Qual Coding Desk</h1>
+          <span id="saveState">Ready</span>
+        </div>
+
+        <section class="side-section collapsible-section is-expanded" data-section="transcripts">
+          <button class="section-title section-toggle" type="button" data-collapse-target="transcripts" aria-expanded="true">
+            <span>Transcripts</span>
+            <small id="transcriptCount">0</small>
+            <span class="chevron">▾</span>
+          </button>
+          <div class="collapsible-body">
+            <div id="transcriptList" class="transcript-list"></div>
+          </div>
+        </section>
+
+        <section class="side-section collapsible-section is-expanded" data-section="recordings">
+          <div class="section-heading-row">
+            <button class="section-title section-toggle" type="button" data-collapse-target="recordings" aria-expanded="true">
+              <span>Recordings</span>
+              <small id="recordingCount">0</small>
+              <span class="chevron">▾</span>
+            </button>
+            <button id="refreshRecordingsButton" class="small-icon-button" type="button" title="Refresh recordings and transcribe new files" aria-label="Refresh recordings">↻</button>
+          </div>
+          <div id="transcriptionProgress" class="transcription-progress" hidden>
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="transcriptionProgressText">Checking for new recordings…</span>
+          </div>
+          <div class="collapsible-body">
+            <div id="recordingList" class="transcript-list"></div>
+          </div>
+        </section>
+
+
+
+        <div class="side-actions">
+          <button id="exportButton" class="primary-button" type="button">Export Excel</button>
+          <button id="saveButton" class="ghost-button" type="button">Save Session File</button>
+          <button id="loadSessionButton" class="ghost-button" type="button">Load Session File</button>
+          <input id="sessionFileInput" type="file" accept=".json,.session.json,application/json" hidden>
+          <button id="sampleButton" class="ghost-button" type="button">Load Sample</button>
+          <button id="clearButton" class="ghost-button danger" type="button">Start Over</button>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Active transcript</p>
+            <h2 id="activeTitle">No transcript loaded</h2>
+          </div>
+          <div class="topbar-actions">
+            <button id="editTranscriptButton" class="ghost-button" type="button">Edit transcript</button>
+            <button id="generateCodesButton" class="primary-button" type="button">Generate codes</button>
+            <button id="settingsButton" class="icon-button" type="button" title="Settings" aria-label="Settings">⚙</button>
+            <label class="coder-id-field" for="coderIdInput">
+              <span>Coder ID</span>
+              <input id="coderIdInput" type="text" autocomplete="off" placeholder="Required before coding">
+            </label>
+          </div>
+        </header>
+
+        <section class="coding-layout">
+          <article class="reader-panel">
+            <div id="emptyState" class="empty-state">
+              <h3>Add a transcript or recording to begin</h3>
+              <p>Put audio files in:</p>
+              <code id="emptyRecordingsFolder" class="folder-path">Loading recordings folder…</code>
+              <p>Deepgram automatically creates transcripts when a key is configured. You can also put `.txt` files in the repository’s <code>transcripts/</code> folder.</p>
+              <button id="emptyStateSettingsButton" class="ghost-button" type="button">View or change recordings folder</button>
+            </div>
+            <div id="reader" class="reader" tabindex="0" aria-label="Transcript text"></div>
+            <div id="transcriptEditor" class="transcript-editor" hidden>
+              <textarea id="transcriptEditorInput" aria-label="Edit transcript text"></textarea>
+              <div class="panel-actions">
+                <button id="saveTranscriptEdit" class="primary-button" type="button">Replace transcript</button>
+                <button id="cancelTranscriptEdit" class="ghost-button" type="button">Cancel</button>
+              </div>
+            </div>
+          </article>
+
+          <aside class="coding-panel">
+            <div class="panel-header">
+              <h3>Code selection</h3>
+              <button id="cancelSelection" class="icon-button" type="button" title="Cancel selection">x</button>
+            </div>
+
+            <textarea id="selectedQuote" rows="5" aria-label="Selected excerpt" readonly>Highlight text in the transcript.</textarea>
+            <small id="highlightEditHint" class="highlight-edit-hint" hidden>Delete text here to remove that part of the highlight, or drag-select the exact desired span in the transcript.</small>
+
+            <div id="highlightExpandActions" class="highlight-expand-actions" hidden>
+              <button id="includePreviousSentence" class="ghost-button" type="button">+ Previous sentence</button>
+              <button id="includeNextSentence" class="ghost-button" type="button">+ Next sentence</button>
+            </div>
+
+            <label>
+              <span>Code</span>
+              <input id="codeInput" type="text" list="codeSuggestions" placeholder="Type or choose an existing code">
+              <datalist id="codeSuggestions"></datalist>
+            </label>
+
+            <label>
+              <span>Description</span>
+              <textarea id="memoInput" rows="4" placeholder="Optional description for the code"></textarea>
+            </label>
+
+            <div class="panel-actions">
+              <button id="applyCode" class="primary-button" type="button">Apply code</button>
+              <button id="deleteCode" class="ghost-button danger" type="button">Delete</button>
+            </div>
+
+            <div class="ai-section">
+              <div class="section-title">
+                <span>AI suggestions</span>
+                <small id="aiSuggestionCount">0</small>
+              </div>
+              <div id="aiSuggestions" class="suggestion-list">
+                <p class="suggestion-hint">Generate codes from the active transcript.</p>
+              </div>
+            </div>
+          </aside>
+        </section>
+
+        <section class="annotation-section">
+          <div class="section-title">
+            <span>Coded excerpts</span>
+            <small id="annotationCount">0 coded excerpts</small>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>PID</th>
+                  <th>Code</th>
+                  <th>Excerpt</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody id="annotationTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div id="setupModal" class="modal-backdrop" hidden>
+      <section class="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
+        <div>
+          <p class="eyebrow">Project setup</p>
+          <h2 id="setupTitle">Start a coding project</h2>
+        </div>
+        <label>
+          <span>Project name</span>
+          <input id="projectNameInput" type="text" placeholder="Example: Interview study round 1">
+        </label>
+        <div class="setup-actions">
+          <button id="useDefaultSetupButton" class="ghost-button" type="button">Use defaults</button>
+          <button id="finishSetupButton" class="primary-button" type="button">Start coding</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="settingsModal" class="modal-backdrop" hidden>
+      <section class="setup-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Project configuration</p>
+            <h2 id="settingsTitle">Settings</h2>
+          </div>
+          <button id="closeSettingsButton" class="icon-button" type="button" aria-label="Close settings">x</button>
+        </div>
+        <label>
+          <span>Research questions or hypotheses</span>
+          <textarea id="researchQuestionsInput" rows="6" placeholder="Enter one or more research questions or hypotheses that should guide coding."></textarea>
+          <small>Used by Generate codes to identify relevant semantic and latent features.</small>
+        </label>
+        <label>
+          <span>Recordings folder</span>
+          <input id="recordingsFolderInput" type="text" placeholder="Absolute folder path">
+          <small id="defaultRecordingsFolderHint"></small>
+        </label>
+        <label>
+          <span>OpenAI API key</span>
+          <input id="openaiApiKeyInput" type="password" autocomplete="off" placeholder="Leave blank to keep the configured key">
+          <small id="openaiKeyStatus"></small>
+        </label>
+        <label>
+          <span>Deepgram API key</span>
+          <input id="deepgramApiKeyInput" type="password" autocomplete="off" placeholder="Leave blank to keep the configured key">
+          <small id="deepgramKeyStatus"></small>
+        </label>
+        <div class="setup-actions">
+          <button id="cancelSettingsButton" class="ghost-button" type="button">Cancel</button>
+          <button id="saveSettingsButton" class="primary-button" type="button">Save settings</button>
+        </div>
+      </section>
+    </div>
+    <script src="script.js"></script>
+  </body>
+</html>

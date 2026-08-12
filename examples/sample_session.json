@@ -1,0 +1,58 @@
+{
+  "projectName": "Sample literature review workflow",
+  "setupComplete": true,
+  "topics": [
+    "Workflow",
+    "Challenge",
+    "Tool requirement",
+    "Outcome"
+  ],
+  "transcripts": [
+    {
+      "id": "sample:sample_transcript.txt",
+      "name": "sample_transcript.txt",
+      "source": "sample",
+      "loadedAt": "2026-07-28T00:00:00.000Z",
+      "text": "Interviewer: Can you walk me through how your team reviews articles?\nParticipant: We usually split the reading across two people, then compare notes in a shared document.\nInterviewer: What makes that process difficult?\nParticipant: The hardest part is noticing when we used different labels for the same idea.\nInterviewer: What would make the coding tool useful?\nParticipant: I would want quick topic editing, clear exports, and a way to return to the same session tomorrow.\n"
+    }
+  ],
+  "activeId": "sample:sample_transcript.txt",
+  "annotations": [
+    {
+      "id": "sample_code_1",
+      "transcriptId": "sample:sample_transcript.txt",
+      "transcriptName": "sample_transcript.txt",
+      "category": "Workflow",
+      "code": "shared reading workflow",
+      "quote": "We usually split the reading across two people, then compare notes in a shared document.",
+      "memo": "Example code showing how a workflow excerpt is captured.",
+      "start": 82,
+      "end": 170,
+      "createdAt": "2026-07-28T00:00:00.000Z"
+    },
+    {
+      "id": "sample_code_2",
+      "transcriptId": "sample:sample_transcript.txt",
+      "transcriptName": "sample_transcript.txt",
+      "category": "Challenge",
+      "code": "inconsistent labels",
+      "quote": "noticing when we used different labels for the same idea",
+      "memo": "Example challenge that may become a theme across transcripts.",
+      "start": 252,
+      "end": 308,
+      "createdAt": "2026-07-28T00:00:00.000Z"
+    },
+    {
+      "id": "sample_code_3",
+      "transcriptId": "sample:sample_transcript.txt",
+      "transcriptName": "sample_transcript.txt",
+      "category": "Tool requirement",
+      "code": "session continuity",
+      "quote": "quick topic editing, clear exports, and a way to return to the same session tomorrow",
+      "memo": "Example requirement for local toolkit design.",
+      "start": 389,
+      "end": 473,
+      "createdAt": "2026-07-28T00:00:00.000Z"
+    }
+  ]
+}
