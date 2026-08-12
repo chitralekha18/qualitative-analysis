@@ -1,4 +1,4 @@
-# Local Qual Coding Desk
+# Local Qualitative Coding Platform
 
 A lightweight, local-first browser app for manually coding qualitative transcripts. It supports reusable codes, saved sessions, optional AI suggestions, optional audio transcription, and Excel exports.
 
