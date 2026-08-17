@@ -7,6 +7,7 @@ This project is built on top of [QualCodeDesk](https://github.com/Dinithipurna/Q
 ## Main changes in this version
 
 - Added optional OpenAI-generated coding suggestions guided by research questions or hypotheses.
+**Note**: Use this feature with caution, as it might influence your coding behaviour  
 - Added optional Deepgram transcription for audio placed in a configurable recordings folder, and automatic speech-to-text for interview recordings.
 - Added synchronized transcript and recording navigation with in-browser audio playback.
 - Added project names, coder IDs, reusable codes, excerpt descriptions, and an aggregated codebook export.
