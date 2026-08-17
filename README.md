@@ -4,6 +4,10 @@ A lightweight, local browser app for manually coding qualitative transcripts. It
 
 This project is built on top of [QualCodeDesk](https://github.com/Dinithipurna/QualCodeDesk).
 
+## Screenshot
+
+![Screenshot of the Local Qualitative Coding Platform](https://github.com/user-attachments/assets/4b55f831-651c-4ef2-840c-292545ea3738)
+
 ## Main changes in this version
 
 - Added optional OpenAI-generated coding suggestions guided by research questions or hypotheses.\
