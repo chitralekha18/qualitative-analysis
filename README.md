@@ -1,6 +1,6 @@
 # Local Qualitative Coding Platform
 
-A lightweight, local-first browser app for manually coding qualitative transcripts. It supports reusable codes, saved sessions, optional AI suggestions, optional audio transcription, and Excel exports.
+A lightweight, local browser app for manually coding qualitative transcripts. It supports reusable codes, saved sessions, optional AI suggestions, optional audio transcription, and Excel exports.
 
 This project is built on top of [QualCodeDesk](https://github.com/Dinithipurna/QualCodeDesk).
 
