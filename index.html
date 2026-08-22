@@ -11,7 +11,10 @@
       <aside class="sidebar">
         <div class="brand-block">
           <h1>Local Qual Coding Desk</h1>
-          <span id="saveState">Ready</span>
+          <div class="brand-actions">
+            <span id="saveState">Ready</span>
+            <button id="collapseSidebarButton" class="sidebar-toggle-button" type="button" title="Minimize sidebar" aria-label="Minimize sidebar" aria-expanded="true">‹</button>
+          </div>
         </div>
 
         <section class="side-section collapsible-section is-expanded" data-section="transcripts">
@@ -55,7 +58,14 @@
         </div>
       </aside>
 
+      <button id="restoreSidebarButton" class="sidebar-restore-button" type="button" title="Show sidebar" aria-label="Show transcripts and recordings sidebar" hidden>›</button>
+
       <section class="workspace">
+        <nav class="workspace-tabs" aria-label="Workspace">
+          <button class="workspace-tab is-active" type="button" data-workspace-tab="coding">1. Code transcripts</button>
+          <button class="workspace-tab" type="button" data-workspace-tab="compare">2. Compare coders</button>
+        </nav>
+        <div id="codingWorkspace" class="workspace-view">
         <header class="topbar">
           <div>
             <p class="eyebrow">Active transcript</p>
@@ -75,11 +85,8 @@
         <section class="coding-layout">
           <article class="reader-panel">
             <div id="emptyState" class="empty-state">
-              <h3>Add a transcript or recording to begin</h3>
-              <p>Put audio files in:</p>
-              <code id="emptyRecordingsFolder" class="folder-path">Loading recordings folder…</code>
-              <p>Deepgram automatically creates transcripts when a key is configured. You can also put `.txt` files in the repository’s <code>transcripts/</code> folder.</p>
-              <button id="emptyStateSettingsButton" class="ghost-button" type="button">View or change recordings folder</button>
+              <h3>Add audio files to the recordings folder to begin.</h3>
+              <p>Transcripts are generated automatically with Deepgram when new recordings are detected.</p>
             </div>
             <div id="reader" class="reader" tabindex="0" aria-label="Transcript text"></div>
             <div id="transcriptEditor" class="transcript-editor" hidden>
@@ -105,10 +112,15 @@
               <button id="includeNextSentence" class="ghost-button" type="button">+ Next sentence</button>
             </div>
 
-            <label>
+            <label class="code-combobox-field">
               <span>Code</span>
-              <input id="codeInput" type="text" list="codeSuggestions" placeholder="Type or choose an existing code">
-              <datalist id="codeSuggestions"></datalist>
+              <div class="code-combobox" id="codeCombobox">
+                <div class="code-combobox-input-wrap">
+                  <input id="codeInput" type="text" autocomplete="off" placeholder="Type or choose an existing code" aria-expanded="false" aria-autocomplete="list" aria-controls="codeSuggestionsList">
+                  <button id="codeDropdownToggle" class="code-dropdown-toggle" type="button" aria-label="Show code options">▾</button>
+                </div>
+                <div id="codeSuggestionsList" class="code-suggestions-list"></div>
+              </div>
             </label>
 
             <label>
@@ -121,7 +133,7 @@
               <button id="deleteCode" class="ghost-button danger" type="button">Delete</button>
             </div>
 
-            <div class="ai-section">
+            <div class="ai-section" hidden aria-hidden="true">
               <div class="section-title">
                 <span>AI suggestions</span>
                 <small id="aiSuggestionCount">0</small>
@@ -133,7 +145,7 @@
           </aside>
         </section>
 
-        <section class="annotation-section">
+        <section class="annotation-section" hidden aria-hidden="true">
           <div class="section-title">
             <span>Coded excerpts</span>
             <small id="annotationCount">0 coded excerpts</small>
@@ -150,6 +162,46 @@
               </thead>
               <tbody id="annotationTable"></tbody>
             </table>
+          </div>
+        </section>
+        </div>
+
+        <section id="compareWorkspace" class="workspace-view compare-workspace" hidden>
+          <nav id="sessionParticipantTabs" class="comparison-participant-tabs" aria-label="Participants coded by both coders" hidden></nav>
+          <section id="sessionComparisonView" class="session-comparison-view">
+            <article class="session-coder-panel">
+              <header><div><strong id="sessionCoderAName">Coder A</strong><label class="compact-session-picker">Session A <input id="coderASessionInput" type="file" accept=".json,.session.json,application/json"></label></div><small id="sessionCoderACount"></small></header>
+              <div id="sessionTranscriptA" class="session-transcript" data-session-side="A"><p class="session-panel-empty">Choose coder A's session above.</p></div>
+              <div id="sessionBubbleA" class="session-code-bubble" hidden></div>
+            </article>
+            <article class="session-coder-panel">
+              <header><div><strong id="sessionCoderBName">Coder B</strong><label class="compact-session-picker">Session B <input id="coderBSessionInput" type="file" accept=".json,.session.json,application/json"></label></div><small id="sessionCoderBCount"></small></header>
+              <div id="sessionTranscriptB" class="session-transcript" data-session-side="B"><p class="session-panel-empty">Choose coder B's session above.</p></div>
+              <div id="sessionBubbleB" class="session-code-bubble" hidden></div>
+            </article>
+            <aside class="session-decision-panel">
+              <header><div><h3>Decision</h3><small id="sessionDecisionParticipant">Load two sessions to begin</small></div></header>
+              <div class="session-compare-actions">
+                <button id="loadSessionComparisonButton" class="primary-button" type="button">Compare sessions</button>
+                <label>Final coder ID <input id="finalSessionCoderId" type="text" value="reconciled"></label>
+                <div id="finalSessionDownloads" hidden>
+                  <button id="downloadFinalSessionButton" class="ghost-button" type="button">Download final session</button>
+                  <button id="downloadFinalExcelButton" class="ghost-button" type="button">Download final Excel</button>
+                </div>
+              </div>
+              <div id="sessionDecisionEmpty" class="decision-empty">Click highlighted text, then choose a coder's code and excerpt.</div>
+              <div id="sessionDecisionEditor" hidden>
+                <label><span>Final code</span><input id="sessionFinalCode" type="text"></label>
+                <label><span>Final highlighted excerpt</span><textarea id="sessionFinalQuote" rows="8" readonly></textarea></label>
+                <small id="sessionDecisionSource"></small>
+                <button id="acceptSessionDecision" class="primary-button" type="button">Accept final code + highlight</button>
+              </div>
+              <section class="accepted-decisions"><h3>Accepted</h3><div id="acceptedSessionDecisions"></div></section>
+            </aside>
+          </section>
+          <div hidden aria-hidden="true">
+            <span id="coderASessionName"></span><span id="coderBSessionName"></span>
+            <input id="coderAWorkbook"><input id="coderBWorkbook"><span id="coderAFileName"></span><span id="coderBFileName"></span><button id="compareWorkbooksButton"></button><input id="useGptAlignment" type="checkbox"><div id="participantAlignment"></div><nav id="comparisonParticipantTabs"></nav><div id="comparisonResults"></div><table><tbody id="comparisonTableBody"></tbody></table><button id="downloadComparisonButton"></button><div id="newComparisonGroupDropzone"></div><div id="comparisonMoveBar"></div><span id="comparisonMoveCode"></span><span id="comparisonMoveCoder"></span><button id="moveComparisonToNewGroup"></button><button id="cancelComparisonMove"></button><div id="comparisonTableWrap"></div>
           </div>
         </section>
       </section>

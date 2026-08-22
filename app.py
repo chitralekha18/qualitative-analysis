@@ -1,11 +1,15 @@
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from difflib import SequenceMatcher
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import os
+import base64
 import json
+import io
 import mimetypes
 import re
 import socket
@@ -13,6 +17,7 @@ import ssl
 import sys
 import time
 import zipfile
+import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 
@@ -51,6 +56,11 @@ RECORDINGS_FOLDER = os.environ.get("RECORDINGS_FOLDER", LOCAL_ENV.get("RECORDING
 RECORDINGS = Path(RECORDINGS_FOLDER).expanduser().resolve() if RECORDINGS_FOLDER else DEFAULT_RECORDINGS
 OPENAI_REQUEST_TIMEOUT_SEC = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_SEC", LOCAL_ENV.get("OPENAI_REQUEST_TIMEOUT_SEC", "120") or "120"))
 OPENAI_REQUEST_RETRIES = int(os.environ.get("OPENAI_REQUEST_RETRIES", LOCAL_ENV.get("OPENAI_REQUEST_RETRIES", "2") or "2"))
+OPENAI_ALIGNMENT_TIMEOUT_SEC = int(os.environ.get("OPENAI_ALIGNMENT_TIMEOUT_SEC", LOCAL_ENV.get("OPENAI_ALIGNMENT_TIMEOUT_SEC", "25") or "25"))
+OPENAI_ALIGNMENT_RETRIES = int(os.environ.get("OPENAI_ALIGNMENT_RETRIES", LOCAL_ENV.get("OPENAI_ALIGNMENT_RETRIES", "0") or "0"))
+OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", LOCAL_ENV.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")).strip() or "text-embedding-3-small"
+OPENAI_ALIGNMENT_SIMILARITY = float(os.environ.get("OPENAI_ALIGNMENT_SIMILARITY", LOCAL_ENV.get("OPENAI_ALIGNMENT_SIMILARITY", "0.66") or "0.66"))
+OPENAI_WITHIN_CODER_SIMILARITY = float(os.environ.get("OPENAI_WITHIN_CODER_SIMILARITY", LOCAL_ENV.get("OPENAI_WITHIN_CODER_SIMILARITY", "0.78") or "0.78"))
 
 TRANSCRIPT_JSON_DIR = TRANSCRIPTS
 SUPPORTED_AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav", ".aac", ".ogg", ".webm", ".mp4"}
@@ -104,6 +114,465 @@ DEFAULT_TOPICS = [
     "Challenge",
     "Outcome",
 ]
+
+XLSX_NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+
+def read_codes_xlsx(raw_bytes):
+    """Read the Codes sheet produced by QualCodeDesk without third-party packages."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
+            shared = []
+            if "xl/sharedStrings.xml" in archive.namelist():
+                root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                shared = ["".join(node.itertext()) for node in root.findall("x:si", XLSX_NS)]
+            sheet = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+    except (KeyError, zipfile.BadZipFile, ET.ParseError) as error:
+        raise ValueError(f"Could not read the Excel workbook: {error}") from error
+
+    table = []
+    for row in sheet.findall(".//x:sheetData/x:row", XLSX_NS):
+        values = []
+        for cell in row.findall("x:c", XLSX_NS):
+            cell_type = cell.get("t")
+            if cell_type == "inlineStr":
+                value = "".join(cell.itertext())
+            else:
+                value_node = cell.find("x:v", XLSX_NS)
+                value = value_node.text if value_node is not None else ""
+                if cell_type == "s" and value:
+                    value = shared[int(value)]
+            values.append(value)
+        table.append(values)
+    if not table:
+        raise ValueError("The Codes sheet is empty.")
+    headers = [str(value).strip() for value in table[0]]
+    required = {"participant_id", "coder_id", "code"}
+    if not required.issubset(headers):
+        raise ValueError("Expected a QualCodeDesk Codes sheet with participant_id, coder_id, and code columns.")
+    return [dict(zip(headers, row + [""] * (len(headers) - len(row)))) for row in table[1:]]
+
+
+def summarize_coder_rows(rows):
+    codes = {}
+    participants = set()
+    coders = set()
+    for row in rows:
+        code = str(row.get("code", "")).strip()
+        pid = str(row.get("participant_id", "")).strip()
+        coder = str(row.get("coder_id", "")).strip()
+        if not code or not pid:
+            continue
+        participants.add(pid)
+        if coder:
+            coders.add(coder)
+        item = codes.setdefault(code, {"code": code, "participants": set(), "count": 0, "descriptions": set()})
+        item["participants"].add(pid)
+        item["count"] += 1
+        description = str(row.get("description", "")).strip()
+        if description:
+            item["descriptions"].add(description)
+    output = []
+    for item in codes.values():
+        output.append({
+            "code": item["code"],
+            "participants": sorted(item["participants"]),
+            "count": item["count"],
+            "description": " | ".join(sorted(item["descriptions"])),
+        })
+    return sorted(output, key=lambda item: item["code"].casefold()), sorted(participants), sorted(coders)
+
+
+def workbook_row_signatures(rows):
+    return {
+        (
+            str(row.get("participant_id", "")).strip(),
+            str(row.get("coder_id", "")).strip(),
+            str(row.get("code", "")).strip(),
+            str(row.get("quote", "")).strip(),
+        )
+        for row in rows
+        if str(row.get("code", "")).strip()
+    }
+
+
+def code_similarity(left, right):
+    def words(value):
+        return set(re.findall(r"[a-z0-9]+", value.casefold()))
+    left_words, right_words = words(left), words(right)
+    union = left_words | right_words
+    jaccard = len(left_words & right_words) / len(union) if union else 0
+    sequence = SequenceMatcher(None, left.casefold(), right.casefold()).ratio()
+    return max(jaccard, sequence)
+
+
+CODE_TOKEN_ALIASES = {
+    "causal": "casual",
+    "convo": "conversation",
+    "convos": "conversation",
+    "conversations": "conversation",
+    "factcheck": "fact-check",
+    "factchecks": "fact-check",
+    "factchecking": "fact-check",
+}
+CODE_FILLER_TOKENS = {"code", "issue", "issues", "related", "thing", "things"}
+NEGATIVE_CODE_TOKENS = {"no", "not", "never", "without", "unacceptable", "uncomfortable", "inaccurate", "incorrect", "useless", "distrust"}
+POSITIVE_CODE_TOKENS = {"acceptable", "comfortable", "accurate", "correct", "useful", "trust", "trusted"}
+
+
+def normalized_code_tokens(value, remove_fillers=False):
+    raw_tokens = re.findall(r"[a-z0-9]+", str(value).casefold())
+    tokens = []
+    for token in raw_tokens:
+        token = CODE_TOKEN_ALIASES.get(token, token)
+        if remove_fillers and token in CODE_FILLER_TOKENS:
+            continue
+        token = stemToken_for_code(token)
+        if remove_fillers and token in CODE_FILLER_TOKENS:
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def stemToken_for_code(token):
+    if len(token) > 5 and token.endswith("ing") and token not in {"thing"}:
+        return token[:-3]
+    if len(token) > 4 and token.endswith("ed"):
+        return token[:-2]
+    if len(token) > 4 and token.endswith("es"):
+        return token[:-2]
+    if len(token) > 3 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def code_polarity(value):
+    tokens = set(normalized_code_tokens(value))
+    negative = bool(tokens & NEGATIVE_CODE_TOKENS) or "didn't" in str(value).casefold() or "wasn't" in str(value).casefold() or "won't" in str(value).casefold()
+    positive = bool(tokens & POSITIVE_CODE_TOKENS)
+    return negative, positive
+
+
+def lightweight_code_match(left, right):
+    """Only accept near-duplicate code wording, not broader topical similarity."""
+    left_negative, left_positive = code_polarity(left)
+    right_negative, right_positive = code_polarity(right)
+    if (left_negative and right_positive and not right_negative) or (right_negative and left_positive and not left_negative):
+        return False, 0
+
+    left_tokens = normalized_code_tokens(left, remove_fillers=True)
+    right_tokens = normalized_code_tokens(right, remove_fillers=True)
+    if not left_tokens or not right_tokens:
+        return False, 0
+    left_set, right_set = set(left_tokens), set(right_tokens)
+    overlap = len(left_set & right_set)
+    containment = overlap / min(len(left_set), len(right_set))
+    union = len(left_set | right_set)
+    jaccard = overlap / union if union else 0
+    sequence = SequenceMatcher(None, " ".join(left_tokens), " ".join(right_tokens)).ratio()
+
+    exact_core = left_set == right_set
+    short_containment = containment == 1 and abs(len(left_set) - len(right_set)) <= 1 and overlap >= 2
+    close_wording = jaccard >= 0.72 and sequence >= 0.72
+    accepted = exact_core or short_containment or close_wording
+    return accepted, round(max(jaccard, sequence, containment if short_containment else 0), 2) if accepted else 0
+
+
+def deterministic_code_groups(codes_a, codes_b):
+    def cluster_one_coder(codes):
+        clusters = []
+        for item in sorted(codes, key=lambda value: (-len(value["code"]), value["code"].casefold())):
+            best_index, best_score = None, 0
+            for index, cluster in enumerate(clusters):
+                matches = [lightweight_code_match(item["code"], member["code"]) for member in cluster]
+                # Complete-link clustering: a new label must resemble every
+                # member, preventing a chain of weak bridges from swallowing
+                # the entire codebook.
+                score = min((value for accepted, value in matches if accepted), default=0)
+                if all(accepted for accepted, value in matches) and score > best_score:
+                    best_index, best_score = index, score
+            if best_index is None:
+                clusters.append([item])
+            else:
+                clusters[best_index].append(item)
+        return clusters
+
+    clusters_a = cluster_one_coder(codes_a)
+    clusters_b = cluster_one_coder(codes_b)
+    candidates = []
+    for index_a, cluster_a in enumerate(clusters_a):
+        for index_b, cluster_b in enumerate(clusters_b):
+            matches = [lightweight_code_match(left["code"], right["code"]) for left in cluster_a for right in cluster_b]
+            exact_match = bool({item["code"].casefold() for item in cluster_a} & {item["code"].casefold() for item in cluster_b})
+            score = max((value for accepted, value in matches if accepted), default=0)
+            if exact_match or score > 0:
+                candidates.append((1 if exact_match else score, score, index_a, index_b))
+
+    paired_a, paired_b, paired = set(), set(), []
+    for priority, score, index_a, index_b in sorted(candidates, reverse=True):
+        if index_a in paired_a or index_b in paired_b:
+            continue
+        paired_a.add(index_a); paired_b.add(index_b)
+        paired.append((clusters_a[index_a], clusters_b[index_b], score))
+    paired.extend((cluster, [], 0) for index, cluster in enumerate(clusters_a) if index not in paired_a)
+    paired.extend(([], cluster, 0) for index, cluster in enumerate(clusters_b) if index not in paired_b)
+
+    groups = []
+    for members_a, members_b, similarity in paired:
+        codes_a_group = sorted((item["code"] for item in members_a), key=str.casefold)
+        codes_b_group = sorted((item["code"] for item in members_b), key=str.casefold)
+        participants_a = set().union(*(set(item["participants"]) for item in members_a)) if members_a else set()
+        participants_b = set().union(*(set(item["participants"]) for item in members_b)) if members_b else set()
+        label = (codes_a_group + codes_b_group)[0]
+        member_count = len(members_a) + len(members_b)
+        groups.append({
+            "codesA": codes_a_group,
+            "codesB": codes_b_group,
+            "label": label,
+            "similarity": round(similarity, 2),
+            "participantOverlap": sorted(participants_a & participants_b),
+            "reason": "Grouped by similar labels, including related labels used by the same coder." if member_count > 1 else f"Only in coder {'A' if members_a else 'B'} workbook.",
+        })
+    return sorted(groups, key=lambda group: group["label"].casefold())
+
+
+def embedding_code_groups(codes_a, codes_b):
+    if not OPENAI_API_KEY:
+        raise ValueError("OpenAI is not configured. Add an API key in Settings or turn off semantic alignment.")
+    if not codes_a or not codes_b:
+        return deterministic_code_groups(codes_a, codes_b)
+
+    all_codes = codes_a + codes_b
+    inputs = [f"Qualitative code: {item['code']}. Description: {item.get('description', '')[:160]}" for item in all_codes]
+    body = json.dumps({"model": OPENAI_EMBEDDING_MODEL, "input": inputs, "encoding_format": "float"}).encode("utf-8")
+    request = Request(
+        "https://api.openai.com/v1/embeddings",
+        data=body,
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=OPENAI_ALIGNMENT_TIMEOUT_SEC, context=SSL_CONTEXT) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        vectors = [item["embedding"] for item in sorted(payload["data"], key=lambda item: item["index"])]
+    except HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise ValueError(f"OpenAI embeddings failed (HTTP {error.code}): {detail}") from error
+    except (URLError, TimeoutError, socket.timeout, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError(f"OpenAI embeddings failed: {getattr(error, 'reason', error)}") from error
+    if len(vectors) != len(all_codes):
+        raise ValueError("OpenAI embeddings returned an unexpected number of results.")
+
+    def cosine(left, right):
+        dot = sum(a * b for a, b in zip(left, right))
+        left_norm = sum(value * value for value in left) ** 0.5
+        right_norm = sum(value * value for value in right) ** 0.5
+        return dot / (left_norm * right_norm) if left_norm and right_norm else 0
+
+    vectors_a = vectors[:len(codes_a)]
+    vectors_b = vectors[len(codes_a):]
+
+    def polarity_conflict(left_code, right_code):
+        left_negative, left_positive = code_polarity(left_code)
+        right_negative, right_positive = code_polarity(right_code)
+        return (left_negative and right_positive and not right_negative) or (right_negative and left_positive and not left_negative)
+
+    def cluster_within_coder(codes, code_vectors):
+        clusters = []
+        for item_index in sorted(range(len(codes)), key=lambda index: (-codes[index].get("count", 0), codes[index]["code"].casefold())):
+            best_cluster, best_score = None, -1
+            for cluster_index, member_indices in enumerate(clusters):
+                comparisons = [
+                    cosine(code_vectors[item_index], code_vectors[member_index])
+                    for member_index in member_indices
+                    if not polarity_conflict(codes[item_index]["code"], codes[member_index]["code"])
+                ]
+                if len(comparisons) != len(member_indices):
+                    continue
+                # Complete-link semantic clustering prevents transitive chains:
+                # the new code must be similar to every existing member.
+                score = min(comparisons)
+                if score >= OPENAI_WITHIN_CODER_SIMILARITY and score > best_score:
+                    best_cluster, best_score = cluster_index, score
+            if best_cluster is None:
+                clusters.append([item_index])
+            else:
+                clusters[best_cluster].append(item_index)
+        return clusters
+
+    def centroid(member_indices, code_vectors):
+        dimensions = len(code_vectors[member_indices[0]])
+        return [sum(code_vectors[index][dimension] for index in member_indices) / len(member_indices) for dimension in range(dimensions)]
+
+    def cluster_cohesion(member_indices, code_vectors):
+        if len(member_indices) < 2:
+            return 0
+        return min(
+            cosine(code_vectors[left], code_vectors[right])
+            for position, left in enumerate(member_indices)
+            for right in member_indices[position + 1:]
+        )
+
+    clusters_a = cluster_within_coder(codes_a, vectors_a)
+    clusters_b = cluster_within_coder(codes_b, vectors_b)
+    centroids_a = [centroid(cluster, vectors_a) for cluster in clusters_a]
+    centroids_b = [centroid(cluster, vectors_b) for cluster in clusters_b]
+    candidates = []
+    for index_a, cluster_a in enumerate(clusters_a):
+        for index_b, cluster_b in enumerate(clusters_b):
+            participants_a = set().union(*(set(codes_a[index]["participants"]) for index in cluster_a))
+            participants_b = set().union(*(set(codes_b[index]["participants"]) for index in cluster_b))
+            if not participants_a & participants_b:
+                continue
+            if any(polarity_conflict(codes_a[left]["code"], codes_b[right]["code"]) for left in cluster_a for right in cluster_b):
+                continue
+            score = cosine(centroids_a[index_a], centroids_b[index_b])
+            if score >= OPENAI_ALIGNMENT_SIMILARITY:
+                candidates.append((score, index_a, index_b))
+
+    # Mutual-best filtering avoids pairing two codes just because both concern
+    # the same broad topic. Each must be the other's strongest available match.
+    best_for_a = {}
+    best_for_b = {}
+    for score, index_a, index_b in candidates:
+        if score > best_for_a.get(index_a, (-1, None))[0]: best_for_a[index_a] = (score, index_b)
+        if score > best_for_b.get(index_b, (-1, None))[0]: best_for_b[index_b] = (score, index_a)
+
+    used_a, used_b, groups = set(), set(), []
+    for score, index_a, index_b in sorted(candidates, reverse=True):
+        if index_a in used_a or index_b in used_b:
+            continue
+        if best_for_a.get(index_a, (None, None))[1] != index_b or best_for_b.get(index_b, (None, None))[1] != index_a:
+            continue
+        used_a.add(index_a); used_b.add(index_b)
+        members_a = [codes_a[index] for index in clusters_a[index_a]]
+        members_b = [codes_b[index] for index in clusters_b[index_b]]
+        labels_a = sorted((item["code"] for item in members_a), key=str.casefold)
+        labels_b = sorted((item["code"] for item in members_b), key=str.casefold)
+        participants_a = set().union(*(set(item["participants"]) for item in members_a))
+        participants_b = set().union(*(set(item["participants"]) for item in members_b))
+        shortest_label = min(labels_a + labels_b, key=len)
+        groups.append({
+            "codesA": labels_a, "codesB": labels_b,
+            "label": shortest_label,
+            "similarity": round(score, 2),
+            "participantOverlap": sorted(participants_a & participants_b),
+            "reason": "Semantic clusters within coders, then mutual-best cross-coder alignment.",
+        })
+
+    for cluster_index, member_indices in enumerate(clusters_a):
+        if cluster_index in used_a:
+            continue
+        members = [codes_a[index] for index in member_indices]
+        labels = sorted((item["code"] for item in members), key=str.casefold)
+        groups.append({"codesA": labels, "codesB": [], "label": min(labels, key=len), "similarity": round(cluster_cohesion(member_indices, vectors_a), 2), "participantOverlap": [], "reason": "Semantically similar codes within coder A." if len(labels) > 1 else "Only in coder A workbook."})
+    for cluster_index, member_indices in enumerate(clusters_b):
+        if cluster_index in used_b:
+            continue
+        members = [codes_b[index] for index in member_indices]
+        labels = sorted((item["code"] for item in members), key=str.casefold)
+        groups.append({"codesA": [], "codesB": labels, "label": min(labels, key=len), "similarity": round(cluster_cohesion(member_indices, vectors_b), 2), "participantOverlap": [], "reason": "Semantically similar codes within coder B." if len(labels) > 1 else "Only in coder B workbook."})
+    return sorted(groups, key=lambda group: group["label"].casefold())
+
+
+def gpt_code_groups(codes_a, codes_b):
+    if not OPENAI_API_KEY:
+        raise ValueError("OpenAI is not configured. Add an API key in Settings or turn off GPT-assisted alignment.")
+    if not codes_a or not codes_b:
+        return deterministic_code_groups(codes_a, codes_b)
+    def compact_codes(codes):
+        return [{
+            "code": item["code"],
+            "description": item.get("description", "")[:120],
+            "occurrence_count": item.get("count", 0),
+        } for item in codes]
+
+    system_prompt = "Find only high-confidence equivalent codes across two granular qualitative codebooks. Labels may use different words but must express the same specific meaning at the same level of granularity. Example: 'Battery drains quickly' and 'battery life was low' may match. Do not match merely because codes share a broader topic. Never match positive with negative, acceptable with unacceptable, comfortable with uncomfortable, accurate with inaccurate, useful with not useful, trust with distrust, or any opposing meanings. Every returned group must contain at least one code from each coder. Omit unmatched codes entirely; do not return singleton groups. Use each input code at most once. Return only exact input labels in codesA and codesB; invent no source labels. Prefer one code per coder unless true wording variants exist. Similarity must be 0 to 1 and at least 0.78. Keep each reason under 12 words."
+    schema = {"type": "object", "additionalProperties": False, "properties": {
+        "groups": {"type": "array", "items": {"type": "object", "additionalProperties": False, "properties": {
+            "codesA": {"type": "array", "items": {"type": "string"}}, "codesB": {"type": "array", "items": {"type": "string"}}, "label": {"type": "string"},
+            "similarity": {"type": "number"}, "reason": {"type": "string"}
+        }, "required": ["codesA", "codesB", "label", "similarity", "reason"]}}
+    }, "required": ["groups"]}
+
+    def request_batch(batch_a, batch_b):
+        prompt = json.dumps({"coder_a_codes": compact_codes(batch_a), "coder_b_codes": compact_codes(batch_b)}, ensure_ascii=False)
+        body = json.dumps({
+            "model": OPENAI_MODEL,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "code_alignment", "strict": True, "schema": schema}},
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+        }).encode("utf-8")
+        last_error = None
+        for attempt in range(1, max(1, OPENAI_ALIGNMENT_RETRIES + 1) + 1):
+            request = Request("https://api.openai.com/v1/chat/completions", data=body, headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, method="POST")
+            try:
+                with urlopen(request, timeout=OPENAI_ALIGNMENT_TIMEOUT_SEC, context=SSL_CONTEXT) as response:
+                    response_data = json.loads(response.read().decode("utf-8"))
+                return parse_json_response(response_data["choices"][0]["message"]["content"])
+            except HTTPError as error:
+                last_error = f"HTTP {error.code}: {error.read().decode('utf-8', errors='replace')}"
+                if not should_retry_http_error(error): break
+            except (URLError, TimeoutError, socket.timeout, KeyError, IndexError, json.JSONDecodeError) as error:
+                last_error = str(getattr(error, "reason", error))
+            if attempt < max(1, OPENAI_ALIGNMENT_RETRIES + 1): time.sleep(1.2 * attempt)
+        raise ValueError(last_error or "unknown GPT batch error")
+
+    shared_participants = sorted(set().union(*(set(item["participants"]) for item in codes_a)) & set().union(*(set(item["participants"]) for item in codes_b)))
+    tasks = []
+    for participant in shared_participants:
+        participant_a = [item for item in codes_a if participant in item["participants"]]
+        participant_b = [item for item in codes_b if participant in item["participants"]]
+        for start in range(0, len(participant_b), 30):
+            tasks.append((participant_a, participant_b[start:start + 30]))
+    if not tasks:
+        tasks = [(codes_a, codes_b[start:start + 30]) for start in range(0, len(codes_b), 30)]
+
+    proposed_groups = []
+    successful_batches = 0
+    with ThreadPoolExecutor(max_workers=min(6, len(tasks))) as executor:
+        futures = [executor.submit(request_batch, batch_a, batch_b) for batch_a, batch_b in tasks]
+        for future in as_completed(futures):
+            try:
+                proposed_groups.extend(future.result().get("groups", []))
+                successful_batches += 1
+            except ValueError:
+                continue
+    if not successful_batches:
+        raise ValueError("All GPT alignment batches timed out or failed.")
+
+    by_a = {item["code"]: item for item in codes_a}; by_b = {item["code"]: item for item in codes_b}
+    used_a, used_b, groups = set(), set(), []
+    for group in sorted(proposed_groups, key=lambda item: float(item.get("similarity", 0)), reverse=True):
+        group_a = [code for code in group.get("codesA", []) if code in by_a and code not in used_a]
+        group_b = [code for code in group.get("codesB", []) if code in by_b and code not in used_b]
+        if not group_a or not group_b or len(group_a) > 3 or len(group_b) > 3:
+            continue
+        combined_codes = group_a + group_b
+        if any(
+            code_polarity(combined_codes[left])[0] != code_polarity(combined_codes[right])[0]
+            and (code_polarity(combined_codes[left])[1] or code_polarity(combined_codes[right])[1])
+            for left in range(len(combined_codes))
+            for right in range(left + 1, len(combined_codes))
+        ):
+            # Reject polarity-conflicting GPT clusters. Their codes remain
+            # available for the conservative deterministic pass below.
+            continue
+        reported_similarity = max(0, min(1, float(group.get("similarity", 0))))
+        if reported_similarity < 0.78:
+            continue
+        used_a.update(group_a); used_b.update(group_b)
+        participants_a = set().union(*(set(by_a[code]["participants"]) for code in group_a)) if group_a else set()
+        participants_b = set().union(*(set(by_b[code]["participants"]) for code in group_b)) if group_b else set()
+        groups.append({
+            "codesA": group_a, "codesB": group_b, "label": str(group.get("label") or (group_a + group_b)[0]).strip(),
+            "similarity": reported_similarity,
+            "participantOverlap": sorted(participants_a & participants_b),
+            "reason": str(group.get("reason", "GPT-assisted semantic cluster")).strip(),
+        })
+    remaining_a = [item for code, item in by_a.items() if code not in used_a]
+    remaining_b = [item for code, item in by_b.items() if code not in used_b]
+    groups.extend(deterministic_code_groups(remaining_a, remaining_b))
+    return groups
 
 
 def safe_filename(name):
@@ -649,6 +1118,9 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/refresh-recordings":
             self.handle_refresh_recordings()
             return
+        if parsed.path == "/api/compare-codebooks":
+            self.handle_compare_codebooks()
+            return
         self.send_error(404, "Not found")
 
     def read_json(self):
@@ -781,6 +1253,78 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def handle_compare_codebooks(self):
+        payload = self.read_json()
+        try:
+            raw_a = base64.b64decode(payload.get("workbookA", ""), validate=True)
+            raw_b = base64.b64decode(payload.get("workbookB", ""), validate=True)
+            rows_a = read_codes_xlsx(raw_a)
+            rows_b = read_codes_xlsx(raw_b)
+            codes_a, participants_a, coders_a = summarize_coder_rows(rows_a)
+            codes_b, participants_b, coders_b = summarize_coder_rows(rows_b)
+            signatures_a = workbook_row_signatures(rows_a)
+            signatures_b = workbook_row_signatures(rows_b)
+            shared_signatures = signatures_a & signatures_b
+            smaller_signature_count = min(len(signatures_a), len(signatures_b))
+            row_overlap = len(shared_signatures) / smaller_signature_count if smaller_signature_count else 0
+            use_gpt = bool(payload.get("useGpt"))
+        except (ValueError, TypeError) as error:
+            self.send_json({"ok": False, "error": str(error)})
+            return
+        shared_participants = sorted(set(participants_a) & set(participants_b))
+        all_participants = shared_participants + sorted((set(participants_a) | set(participants_b)) - set(shared_participants))
+
+        def compare_participant(participant):
+            participant_rows_a = [row for row in rows_a if str(row.get("participant_id", "")).strip() == participant]
+            participant_rows_b = [row for row in rows_b if str(row.get("participant_id", "")).strip() == participant]
+            participant_codes_a = summarize_coder_rows(participant_rows_a)[0]
+            participant_codes_b = summarize_coder_rows(participant_rows_b)[0]
+            method = "local"
+            fallback_reason = ""
+            if use_gpt and participant_codes_a and participant_codes_b:
+                try:
+                    groups = embedding_code_groups(participant_codes_a, participant_codes_b)
+                    method = "gpt"
+                except ValueError as error:
+                    groups = deterministic_code_groups(participant_codes_a, participant_codes_b)
+                    method = "local_fallback"
+                    fallback_reason = str(error)
+            else:
+                groups = deterministic_code_groups(participant_codes_a, participant_codes_b)
+            return {
+                "participantId": participant,
+                "participantStatus": "shared" if participant in shared_participants else ("a_only" if participant in participants_a else "b_only"),
+                "codesA": participant_codes_a,
+                "codesB": participant_codes_b,
+                "groups": groups,
+                "method": method,
+                "fallbackReason": fallback_reason,
+            }
+
+        participant_comparisons = []
+        if all_participants:
+            with ThreadPoolExecutor(max_workers=min(5, len(all_participants))) as executor:
+                futures = {executor.submit(compare_participant, participant): participant for participant in all_participants}
+                completed = {}
+                for future in as_completed(futures):
+                    result = future.result()
+                    completed[result["participantId"]] = result
+            participant_comparisons = [completed[participant] for participant in all_participants]
+        self.send_json({
+            "ok": True,
+            "coderA": ", ".join(coders_a) or "Coder A",
+            "coderB": ", ".join(coders_b) or "Coder B",
+            "participantsA": participants_a,
+            "participantsB": participants_b,
+            "sharedParticipants": shared_participants,
+            "onlyParticipantsA": sorted(set(participants_a) - set(participants_b)),
+            "onlyParticipantsB": sorted(set(participants_b) - set(participants_a)),
+            "rowOverlap": round(row_overlap, 3),
+            "workbooksIdentical": signatures_a == signatures_b,
+            "mixedCoderWarning": len(coders_a) > 1 or len(coders_b) > 1,
+            "participantComparisons": participant_comparisons,
+        })
+
     def handle_generate_codes(self):
         if not OPENAI_API_KEY:
             self.send_json({"ok": False, "error": "OPENAI_API_KEY is not set."})
@@ -891,7 +1435,7 @@ class Handler(SimpleHTTPRequestHandler):
                         "error": (
                             "OpenAI request failed: "
                             f"{last_error}. "
-                            "If this is a certificate error, set CA_BUNDLE_PATH in the repository's .env file "
+                            "If this is a certificate error, set CA_BUNDLE_PATH in QualCodeDesk/.env "
                             "(for macOS usually /etc/ssl/cert.pem)."
                         ),
                     })

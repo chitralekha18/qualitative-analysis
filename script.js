@@ -97,10 +97,69 @@ const state = {
 };
 
 const storageKey = "localQualCodingDesk.v2";
+const sidebarCollapsedKey = "localQualCodingDesk.sidebarCollapsed";
 let runtimeSettings = {};
 let generationProgressTimer = null;
+let filteredCodeOptions = [];
+let activeCodeOptionIndex = -1;
+let comparisonData = null;
+let draggedComparisonCode = null;
+let selectedComparisonMove = null;
+let activeComparisonParticipantId = null;
+let sessionComparison = { sessionA: null, sessionB: null, participants: [], activeParticipantId: null, candidate: null, accepted: [] };
 
 const els = {
+  appShell: document.querySelector(".app-shell"),
+  collapseSidebarButton: document.querySelector("#collapseSidebarButton"),
+  restoreSidebarButton: document.querySelector("#restoreSidebarButton"),
+  workspaceTabs: [...document.querySelectorAll("[data-workspace-tab]")],
+  codingWorkspace: document.querySelector("#codingWorkspace"),
+  compareWorkspace: document.querySelector("#compareWorkspace"),
+  coderASessionInput: document.querySelector("#coderASessionInput"),
+  coderBSessionInput: document.querySelector("#coderBSessionInput"),
+  coderASessionName: document.querySelector("#coderASessionName"),
+  coderBSessionName: document.querySelector("#coderBSessionName"),
+  loadSessionComparisonButton: document.querySelector("#loadSessionComparisonButton"),
+  sessionParticipantTabs: document.querySelector("#sessionParticipantTabs"),
+  sessionComparisonView: document.querySelector("#sessionComparisonView"),
+  sessionCoderAName: document.querySelector("#sessionCoderAName"),
+  sessionCoderBName: document.querySelector("#sessionCoderBName"),
+  sessionCoderACount: document.querySelector("#sessionCoderACount"),
+  sessionCoderBCount: document.querySelector("#sessionCoderBCount"),
+  sessionTranscriptA: document.querySelector("#sessionTranscriptA"),
+  sessionTranscriptB: document.querySelector("#sessionTranscriptB"),
+  sessionBubbleA: document.querySelector("#sessionBubbleA"),
+  sessionBubbleB: document.querySelector("#sessionBubbleB"),
+  sessionDecisionParticipant: document.querySelector("#sessionDecisionParticipant"),
+  sessionDecisionEmpty: document.querySelector("#sessionDecisionEmpty"),
+  sessionDecisionEditor: document.querySelector("#sessionDecisionEditor"),
+  sessionFinalCode: document.querySelector("#sessionFinalCode"),
+  sessionFinalQuote: document.querySelector("#sessionFinalQuote"),
+  sessionDecisionSource: document.querySelector("#sessionDecisionSource"),
+  acceptSessionDecision: document.querySelector("#acceptSessionDecision"),
+  acceptedSessionDecisions: document.querySelector("#acceptedSessionDecisions"),
+  finalSessionCoderId: document.querySelector("#finalSessionCoderId"),
+  finalSessionDownloads: document.querySelector("#finalSessionDownloads"),
+  downloadFinalSessionButton: document.querySelector("#downloadFinalSessionButton"),
+  downloadFinalExcelButton: document.querySelector("#downloadFinalExcelButton"),
+  coderAWorkbook: document.querySelector("#coderAWorkbook"),
+  coderBWorkbook: document.querySelector("#coderBWorkbook"),
+  coderAFileName: document.querySelector("#coderAFileName"),
+  coderBFileName: document.querySelector("#coderBFileName"),
+  compareWorkbooksButton: document.querySelector("#compareWorkbooksButton"),
+  useGptAlignment: document.querySelector("#useGptAlignment"),
+  participantAlignment: document.querySelector("#participantAlignment"),
+  comparisonParticipantTabs: document.querySelector("#comparisonParticipantTabs"),
+  comparisonResults: document.querySelector("#comparisonResults"),
+  comparisonTableBody: document.querySelector("#comparisonTableBody"),
+  downloadComparisonButton: document.querySelector("#downloadComparisonButton"),
+  newComparisonGroupDropzone: document.querySelector("#newComparisonGroupDropzone"),
+  comparisonMoveBar: document.querySelector("#comparisonMoveBar"),
+  comparisonMoveCode: document.querySelector("#comparisonMoveCode"),
+  comparisonMoveCoder: document.querySelector("#comparisonMoveCoder"),
+  moveComparisonToNewGroup: document.querySelector("#moveComparisonToNewGroup"),
+  cancelComparisonMove: document.querySelector("#cancelComparisonMove"),
+  comparisonTableWrap: document.querySelector("#comparisonTableWrap"),
   transcriptList: document.querySelector("#transcriptList"),
   researchQuestionsInput: document.querySelector("#researchQuestionsInput"),
   transcriptCount: document.querySelector("#transcriptCount"),
@@ -113,8 +172,6 @@ const els = {
   coderIdInput: document.querySelector("#coderIdInput"),
   generateCodesButton: document.querySelector("#generateCodesButton"),
   settingsButton: document.querySelector("#settingsButton"),
-  emptyStateSettingsButton: document.querySelector("#emptyStateSettingsButton"),
-  emptyRecordingsFolder: document.querySelector("#emptyRecordingsFolder"),
   settingsModal: document.querySelector("#settingsModal"),
   closeSettingsButton: document.querySelector("#closeSettingsButton"),
   cancelSettingsButton: document.querySelector("#cancelSettingsButton"),
@@ -142,7 +199,9 @@ const els = {
   includePreviousSentence: document.querySelector("#includePreviousSentence"),
   includeNextSentence: document.querySelector("#includeNextSentence"),
   codeInput: document.querySelector("#codeInput"),
-  codeSuggestions: document.querySelector("#codeSuggestions"),
+  codeCombobox: document.querySelector("#codeCombobox"),
+  codeDropdownToggle: document.querySelector("#codeDropdownToggle"),
+  codeSuggestionsList: document.querySelector("#codeSuggestionsList"),
   memoInput: document.querySelector("#memoInput"),
   applyCode: document.querySelector("#applyCode"),
   deleteCode: document.querySelector("#deleteCode"),
@@ -159,6 +218,454 @@ const els = {
   aiSuggestions: document.querySelector("#aiSuggestions"),
   aiSuggestionCount: document.querySelector("#aiSuggestionCount"),
 };
+
+function selectWorkspaceTab(name) {
+  els.workspaceTabs.forEach((button) => button.classList.toggle("is-active", button.dataset.workspaceTab === name));
+  els.codingWorkspace.hidden = name !== "coding";
+  els.compareWorkspace.hidden = name !== "compare";
+}
+
+function setSidebarCollapsed(collapsed, persist = true) {
+  els.appShell.classList.toggle("sidebar-is-collapsed", collapsed);
+  els.collapseSidebarButton.setAttribute("aria-expanded", String(!collapsed));
+  els.restoreSidebarButton.hidden = !collapsed;
+  if (persist) localStorage.setItem(sidebarCollapsedKey, collapsed ? "true" : "false");
+}
+
+function sessionParticipantId(value) {
+  const name = String(value || "").split(/[\\/]/).pop() || "";
+  return name.replace(/\.txt$/i, "").replace(/\.[^.]+$/, "");
+}
+
+function prepareCodingSession(payload, fallbackName) {
+  if (!payload || !Array.isArray(payload.transcripts) || !Array.isArray(payload.annotations)) {
+    throw new Error(`${fallbackName} is not a valid QualCodeDesk session file.`);
+  }
+  const coderId = String(payload.coderId || fallbackName).trim() || fallbackName;
+  // The uploaded session is the comparison boundary. Imported or reconciled
+  // annotations may retain a different original coderId, so keep them visible
+  // and use their embedded coderId only as provenance.
+  const annotations = payload.annotations;
+  const transcriptsByParticipant = new Map();
+  payload.transcripts.forEach((transcript) => {
+    const participantId = sessionParticipantId(transcript.name || transcript.id);
+    if (participantId) transcriptsByParticipant.set(participantId, transcript);
+  });
+  const annotationsByParticipant = new Map();
+  annotations.forEach((annotation, index) => {
+    const participantId = sessionParticipantId(annotation.transcriptName || annotation.transcriptId);
+    if (!participantId || !transcriptsByParticipant.has(participantId)) return;
+    const prepared = { ...annotation, comparisonId: `${fallbackName}_${index}`, participantId };
+    if (!annotationsByParticipant.has(participantId)) annotationsByParticipant.set(participantId, []);
+    annotationsByParticipant.get(participantId).push(prepared);
+  });
+  return { coderId, transcriptsByParticipant, annotationsByParticipant, payload };
+}
+
+function renderSessionTranscript(container, transcript, annotations, side) {
+  const text = String(transcript?.text || "");
+  const valid = annotations.filter((item) => Number.isInteger(Number(item.start)) && Number.isInteger(Number(item.end)) && Number(item.end) > Number(item.start) && Number(item.start) >= 0 && Number(item.end) <= text.length);
+  const boundaries = new Set([0, text.length]);
+  valid.forEach((item) => { boundaries.add(Number(item.start)); boundaries.add(Number(item.end)); });
+  const points = [...boundaries].sort((left, right) => left - right);
+  const pieces = [];
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const start = points[index];
+    const end = points[index + 1];
+    if (end <= start) continue;
+    const active = valid.filter((item) => Number(item.start) <= start && Number(item.end) >= end);
+    const content = escapeHtml(text.slice(start, end));
+    pieces.push(active.length
+      ? `<mark class="session-highlight session-highlight-${side.toLowerCase()}" data-session-side="${side}" data-annotation-ids="${active.map((item) => item.comparisonId).join("|")}">${content}</mark>`
+      : content);
+  }
+  container.innerHTML = pieces.join("");
+}
+
+function activeSessionParticipant() {
+  return sessionComparison.participants.find((item) => item.participantId === sessionComparison.activeParticipantId);
+}
+
+function renderAcceptedSessionDecisions() {
+  const decisions = sessionComparison.accepted.filter((item) => item.participantId === sessionComparison.activeParticipantId);
+  els.acceptedSessionDecisions.innerHTML = decisions.length ? decisions.map((item) => `
+    <article class="accepted-decision-card">
+      <strong>${escapeHtml(item.code)}</strong>
+      <p>“${escapeHtml(truncate(item.quote, 150))}”</p>
+      <small>Chosen from ${escapeHtml(item.sourceCoder)}</small>
+      <button type="button" data-remove-session-decision="${escapeHtml(item.id)}">Remove</button>
+    </article>`).join("") : '<p class="decision-empty">No accepted decisions for this participant yet.</p>';
+}
+
+function renderSessionComparisonParticipant() {
+  const participant = activeSessionParticipant();
+  if (!participant) return;
+  sessionComparison.candidate = null;
+  els.sessionParticipantTabs.innerHTML = sessionComparison.participants.map((item) => `
+    <button type="button" class="comparison-participant-tab ${item.participantId === participant.participantId ? "is-active" : ""}" data-session-participant="${escapeHtml(item.participantId)}">
+      <span>${escapeHtml(item.participantId)}</span>
+      <small>${sessionComparison.accepted.filter((decision) => decision.participantId === item.participantId).length} accepted</small>
+    </button>`).join("");
+  els.sessionCoderAName.textContent = sessionComparison.sessionA.coderId;
+  els.sessionCoderBName.textContent = sessionComparison.sessionB.coderId;
+  els.sessionCoderACount.textContent = `${participant.annotationsA.length} coded highlight${participant.annotationsA.length === 1 ? "" : "s"}`;
+  els.sessionCoderBCount.textContent = `${participant.annotationsB.length} coded highlight${participant.annotationsB.length === 1 ? "" : "s"}`;
+  els.sessionDecisionParticipant.textContent = `Participant ${participant.participantId}`;
+  renderSessionTranscript(els.sessionTranscriptA, participant.transcriptA, participant.annotationsA, "A");
+  renderSessionTranscript(els.sessionTranscriptB, participant.transcriptB, participant.annotationsB, "B");
+  els.sessionTranscriptA.scrollTop = 0;
+  els.sessionTranscriptB.scrollTop = 0;
+  els.sessionBubbleA.hidden = true;
+  els.sessionBubbleB.hidden = true;
+  els.sessionDecisionEmpty.hidden = false;
+  els.sessionDecisionEditor.hidden = true;
+  renderAcceptedSessionDecisions();
+  els.sessionParticipantTabs.hidden = false;
+  els.sessionComparisonView.hidden = false;
+}
+
+async function loadSessionComparison() {
+  const fileA = els.coderASessionInput.files?.[0];
+  const fileB = els.coderBSessionInput.files?.[0];
+  if (!fileA || !fileB) { alert("Choose both coding session files first."); return; }
+  els.loadSessionComparisonButton.disabled = true;
+  els.loadSessionComparisonButton.textContent = "Loading…";
+  try {
+    const [payloadA, payloadB] = await Promise.all([fileA.text().then(JSON.parse), fileB.text().then(JSON.parse)]);
+    const sessionA = prepareCodingSession(payloadA, "Coder A");
+    const sessionB = prepareCodingSession(payloadB, "Coder B");
+    const commonParticipants = [...sessionA.annotationsByParticipant.keys()]
+      .filter((participantId) => sessionB.annotationsByParticipant.has(participantId))
+      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+    if (!commonParticipants.length) throw new Error("The sessions do not contain any participant coded by both coders.");
+    const participants = commonParticipants.map((participantId) => ({
+      participantId,
+      transcriptA: sessionA.transcriptsByParticipant.get(participantId),
+      transcriptB: sessionB.transcriptsByParticipant.get(participantId),
+      annotationsA: sessionA.annotationsByParticipant.get(participantId) || [],
+      annotationsB: sessionB.annotationsByParticipant.get(participantId) || [],
+    }));
+    sessionComparison = { sessionA, sessionB, participants, activeParticipantId: commonParticipants[0], candidate: null, accepted: [] };
+    els.finalSessionCoderId.value = "reconciled";
+    els.finalSessionDownloads.hidden = false;
+    renderSessionComparisonParticipant();
+  } catch (error) {
+    console.error(error);
+    alert(error.message || "Could not load the coding sessions.");
+  } finally {
+    els.loadSessionComparisonButton.disabled = false;
+    els.loadSessionComparisonButton.textContent = "Compare sessions";
+  }
+}
+
+function sessionAnnotationById(side, annotationId) {
+  const participant = activeSessionParticipant();
+  return (side === "A" ? participant?.annotationsA : participant?.annotationsB)?.find((item) => item.comparisonId === annotationId);
+}
+
+function showSessionCodeBubble(event, side) {
+  const highlight = event.target.closest(".session-highlight");
+  if (!highlight) return;
+  const ids = String(highlight.dataset.annotationIds || "").split("|").filter(Boolean);
+  const annotations = ids.map((id) => sessionAnnotationById(side, id)).filter(Boolean);
+  const bubble = side === "A" ? els.sessionBubbleA : els.sessionBubbleB;
+  const panel = bubble.closest(".session-coder-panel");
+  const panelRect = panel.getBoundingClientRect();
+  bubble.innerHTML = annotations.map((item) => `
+    <div><span>${escapeHtml(item.code)}</span><button type="button" data-choose-session-code="${escapeHtml(item.comparisonId)}" data-choose-session-side="${side}">Choose</button></div>`).join("");
+  bubble.style.left = `${Math.max(8, Math.min(event.clientX - panelRect.left, panelRect.width - 240))}px`;
+  bubble.style.top = `${Math.max(48, Math.min(event.clientY - panelRect.top + 8, panelRect.height - 150))}px`;
+  bubble.hidden = false;
+}
+
+function chooseSessionAnnotation(side, annotationId) {
+  const annotation = sessionAnnotationById(side, annotationId);
+  if (!annotation) return;
+  const sessionCoder = side === "A" ? sessionComparison.sessionA.coderId : sessionComparison.sessionB.coderId;
+  sessionComparison.candidate = {
+    ...annotation,
+    side,
+    sourceCoder: String(annotation.coderId || "").trim() || sessionCoder,
+    sourceSessionCoder: sessionCoder,
+  };
+  els.sessionFinalCode.value = annotation.code || "";
+  els.sessionFinalQuote.value = annotation.quote || "";
+  els.sessionDecisionSource.textContent = `Selected from ${sessionComparison.candidate.sourceCoder}`;
+  els.sessionDecisionEmpty.hidden = true;
+  els.sessionDecisionEditor.hidden = false;
+  els.sessionBubbleA.hidden = true;
+  els.sessionBubbleB.hidden = true;
+}
+
+function acceptSessionDecision() {
+  const candidate = sessionComparison.candidate;
+  const code = els.sessionFinalCode.value.trim();
+  if (!candidate || !code) { alert("Choose a highlighted code and enter the final code label first."); return; }
+  sessionComparison.accepted.push({ id: uid("decision"), participantId: sessionComparison.activeParticipantId, code, quote: candidate.quote || "", start: candidate.start, end: candidate.end, startTimeSec: candidate.startTimeSec ?? null, endTimeSec: candidate.endTimeSec ?? null, sourceCoder: candidate.sourceCoder, sourceAnnotationId: candidate.id || candidate.comparisonId });
+  sessionComparison.candidate = null;
+  els.sessionDecisionEmpty.hidden = false;
+  els.sessionDecisionEditor.hidden = true;
+  renderAcceptedSessionDecisions();
+  const activeTabCount = els.sessionParticipantTabs.querySelector(`[data-session-participant="${CSS.escape(sessionComparison.activeParticipantId)}"] small`);
+  if (activeTabCount) activeTabCount.textContent = `${sessionComparison.accepted.filter((decision) => decision.participantId === sessionComparison.activeParticipantId).length} accepted`;
+}
+
+function buildFinalSessionPayload() {
+  if (!sessionComparison.sessionA || !sessionComparison.participants.length) throw new Error("Load and compare two sessions first.");
+  if (!sessionComparison.accepted.length) throw new Error("Accept at least one final code and highlight before downloading.");
+  const coderId = els.finalSessionCoderId.value.trim();
+  if (!coderId) throw new Error("Enter a final coder ID before downloading.");
+  const transcriptByParticipant = new Map(sessionComparison.participants.map((item) => [item.participantId, item.transcriptA]));
+  const annotations = sessionComparison.accepted.map((decision) => {
+    const transcript = transcriptByParticipant.get(decision.participantId);
+    return {
+      id: decision.id,
+      transcriptId: transcript.id,
+      transcriptName: transcript.name,
+      category: "",
+      code: decision.code,
+      quote: decision.quote,
+      memo: `Reconciled from ${decision.sourceCoder}`,
+      coderId,
+      start: decision.start,
+      end: decision.end,
+      startTimeSec: decision.startTimeSec,
+      endTimeSec: decision.endTimeSec,
+      createdAt: new Date().toISOString(),
+    };
+  });
+  const source = sessionComparison.sessionA.payload;
+  const transcripts = sessionComparison.participants.map((item) => item.transcriptA);
+  return {
+    projectName: `Reconciled ${sessionComparison.sessionA.coderId} + ${sessionComparison.sessionB.coderId}`,
+    coderId,
+    researchQuestions: source.researchQuestions || "",
+    transcripts,
+    recordings: source.recordings || [],
+    topics: source.topics || [...defaultTopics],
+    activeId: transcripts[0]?.id || null,
+    activeRecordingId: null,
+    annotations,
+    generatedCodeSuggestions: [],
+    selectedAiSuggestionIndex: null,
+    generatedCodeHistory: [],
+    generatedSpecialHighlights: [],
+    selectedRange: null,
+    editingId: null,
+    editingTranscript: false,
+    setupComplete: true,
+    savedAt: new Date().toISOString(),
+    sessionFormat: "qual-code-desk-session",
+    sessionVersion: 2,
+  };
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function downloadFinalSession() {
+  try {
+    const payload = buildFinalSessionPayload();
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "Z");
+    const safeCoderId = payload.coderId.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[_\.]+|[_\.]+$/g, "") || "reconciled";
+    downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }), `${safeCoderId}-${stamp}.session.json`);
+  } catch (error) {
+    alert(error.message || "Could not build the final session.");
+  }
+}
+
+async function downloadFinalExcel() {
+  try {
+    const payload = buildFinalSessionPayload();
+    const response = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!response.ok) throw new Error("Final Excel export failed.");
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] || `${payload.coderId}_reconciled.xlsx`;
+    downloadBlob(blob, filename);
+  } catch (error) {
+    console.error(error);
+    alert(error.message || "Could not export the final Excel file.");
+  }
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = () => reject(reader.error || new Error("Could not read workbook."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderComparison() {
+  if (!comparisonData) return;
+  const shared = comparisonData.sharedParticipants || [];
+  const onlyA = comparisonData.onlyParticipantsA || [];
+  const onlyB = comparisonData.onlyParticipantsB || [];
+  const alignmentMethod = comparisonData.method === "gpt"
+    ? "OpenAI semantic alignment completed. Review semantic matches before merging labels."
+    : comparisonData.method === "local_fallback"
+      ? `OpenAI semantic matching was unavailable, so the local matcher completed the comparison. ${comparisonData.fallbackReason || "No error detail was returned."}`
+      : "Local label-similarity alignment completed.";
+  const workbookWarning = comparisonData.workbooksIdentical
+    ? "These workbooks contain the same coded rows. Choose two genuinely separate coder exports to compare independent coding."
+    : comparisonData.rowOverlap >= 0.9
+      ? `These workbooks share ${Math.round(comparisonData.rowOverlap * 100)}% of their coded rows, so most results will be identical.`
+      : comparisonData.mixedCoderWarning
+        ? "At least one workbook contains multiple coder IDs. For a clean comparison, export one coder's rows per workbook."
+        : "";
+  els.participantAlignment.innerHTML = `
+    <div><strong>${escapeHtml(comparisonData.coderA)}</strong><span>${comparisonData.participantsA.length} participants</span></div>
+    <div class="alignment-shared"><strong>${shared.length} aligned participant ID${shared.length === 1 ? "" : "s"}</strong><span>${escapeHtml(shared.join(", ") || "None")}</span></div>
+    <div><strong>${escapeHtml(comparisonData.coderB)}</strong><span>${comparisonData.participantsB.length} participants</span></div>
+    ${(onlyA.length || onlyB.length) ? `<p class="alignment-warning">Not shared — A only: ${escapeHtml(onlyA.join(", ") || "none")}; B only: ${escapeHtml(onlyB.join(", ") || "none")}</p>` : ""}
+    ${workbookWarning ? `<p class="workbook-warning">${escapeHtml(workbookWarning)}</p>` : ""}
+    <p class="alignment-method ${comparisonData.method === "local_fallback" ? "is-fallback" : ""}">${escapeHtml(alignmentMethod)}</p>`;
+  els.participantAlignment.hidden = false;
+  const participantComparisons = comparisonData.participantComparisons || [];
+  els.comparisonParticipantTabs.innerHTML = participantComparisons.map((comparison) => `
+    <button type="button" class="comparison-participant-tab ${comparison.participantId === activeComparisonParticipantId ? "is-active" : ""}" data-comparison-participant="${escapeHtml(comparison.participantId)}">
+      <span>${escapeHtml(comparison.participantId)} ${comparison.participantStatus === "a_only" ? '<em>A only</em>' : comparison.participantStatus === "b_only" ? '<em>B only</em>' : ""}</span>
+      <small>${comparison.groups.filter((group) => group.accepted).length}/${comparison.groups.length} accepted</small>
+    </button>`).join("");
+  els.comparisonParticipantTabs.hidden = participantComparisons.length === 0;
+  const codeButtons = (codes, side, groupIndex) => codes.length
+    ? codes.map((code) => `<div class="code-chip-row ${selectedComparisonMove?.code === code && selectedComparisonMove?.side === side ? "is-selected-for-move" : ""}"><button type="button" draggable="true" class="code-label-choice draggable-code" data-label-value="${escapeHtml(code)}" data-code="${escapeHtml(code)}" data-side="${side}" data-group-index="${groupIndex}" title="Drag to another group, or click to use as the merged label">${escapeHtml(code)}</button><button type="button" class="move-code-button" data-move-code="${escapeHtml(code)}" data-move-side="${side}" data-move-group-index="${groupIndex}">Move</button></div>`).join("")
+    : "—";
+  comparisonData.groups.sort((left, right) => {
+    const rank = (group) => group.accepted ? 2 : ((group.codesA || []).length && (group.codesB || []).length ? 0 : 1);
+    return rank(left) - rank(right) || String(left.label || "").localeCompare(String(right.label || ""));
+  });
+  els.comparisonTableBody.innerHTML = comparisonData.groups.map((group, index) => `
+    <tr data-comparison-index="${index}" class="${group.accepted ? "is-accepted" : ""}">
+      <td class="code-drop-cell" data-drop-side="A" data-drop-group-index="${index}"><div class="code-cluster">${codeButtons(group.codesA || [], "A", index)}</div>${selectedComparisonMove?.side === "A" && selectedComparisonMove.groupIndex !== index ? `<button class="move-here-button" type="button" data-move-here-index="${index}">Move here</button>` : ""}</td>
+      <td class="code-drop-cell" data-drop-side="B" data-drop-group-index="${index}"><div class="code-cluster">${codeButtons(group.codesB || [], "B", index)}</div>${selectedComparisonMove?.side === "B" && selectedComparisonMove.groupIndex !== index ? `<button class="move-here-button" type="button" data-move-here-index="${index}">Move here</button>` : ""}</td>
+      <td><span class="participant-pills">${escapeHtml((group.participantOverlap || []).join(", ") || "—")}</span></td>
+      <td><span class="match-score">${Math.round((group.similarity || 0) * 100)}%</span><small>${escapeHtml(group.reason || "")}</small></td>
+      <td><div class="merged-label-controls"><input class="merged-label-input" type="text" value="${escapeHtml(group.label || [...(group.codesA || []), ...(group.codesB || [])][0] || "")}" aria-label="Merged label for code cluster"><button class="accept-row-button ${group.accepted ? "is-accepted" : ""}" type="button" data-accept-row-index="${index}">${group.accepted ? "✓ Accepted — undo" : "Accept row"}</button></div></td>
+    </tr>`).join("");
+  els.comparisonResults.hidden = false;
+  els.comparisonMoveBar.hidden = !selectedComparisonMove;
+  if (selectedComparisonMove) {
+    els.comparisonMoveCode.textContent = selectedComparisonMove.code;
+    els.comparisonMoveCoder.textContent = selectedComparisonMove.side === "A" ? comparisonData.coderA : comparisonData.coderB;
+  }
+}
+
+function activateComparisonParticipant(participantId) {
+  const comparison = (comparisonData?.participantComparisons || []).find((item) => item.participantId === participantId);
+  if (!comparison) return;
+  activeComparisonParticipantId = participantId;
+  comparisonData.groups = comparison.groups;
+  comparisonData.codesA = comparison.codesA;
+  comparisonData.codesB = comparison.codesB;
+  comparisonData.method = comparison.method;
+  comparisonData.fallbackReason = comparison.fallbackReason;
+  selectedComparisonMove = null;
+  draggedComparisonCode = null;
+  renderComparison();
+}
+
+function comparisonCodeParticipants(side, code) {
+  const summaries = side === "A" ? comparisonData.codesA : comparisonData.codesB;
+  return new Set((summaries || []).find((item) => item.code === code)?.participants || []);
+}
+
+function refreshComparisonGroup(group) {
+  const participantsA = new Set();
+  const participantsB = new Set();
+  (group.codesA || []).forEach((code) => comparisonCodeParticipants("A", code).forEach((pid) => participantsA.add(pid)));
+  (group.codesB || []).forEach((code) => comparisonCodeParticipants("B", code).forEach((pid) => participantsB.add(pid)));
+  group.participantOverlap = [...participantsA].filter((pid) => participantsB.has(pid)).sort();
+  group.similarity = 0;
+  group.reason = "Manually arranged by reviewer.";
+  group.accepted = false;
+  const availableCodes = [...(group.codesA || []), ...(group.codesB || [])];
+  if (!availableCodes.includes(group.label)) group.label = availableCodes[0] || "";
+}
+
+function moveComparisonCode(targetGroupIndex = null) {
+  const move = draggedComparisonCode || selectedComparisonMove;
+  if (!comparisonData || !move) return;
+  const { code, side, groupIndex: sourceGroupIndex } = move;
+  const source = comparisonData.groups[sourceGroupIndex];
+  if (!source) return;
+  const key = side === "A" ? "codesA" : "codesB";
+  source[key] = (source[key] || []).filter((value) => value !== code);
+  refreshComparisonGroup(source);
+
+  if (targetGroupIndex === null) {
+    const newGroup = { codesA: [], codesB: [], label: code, similarity: 0, participantOverlap: [], reason: "New group created manually." };
+    newGroup[key].push(code);
+    comparisonData.groups.push(newGroup);
+    refreshComparisonGroup(newGroup);
+  } else {
+    const target = comparisonData.groups[targetGroupIndex];
+    if (target && !target[key].includes(code)) target[key].push(code);
+    if (target) {
+      target[key].sort((left, right) => left.localeCompare(right));
+      refreshComparisonGroup(target);
+    }
+  }
+  comparisonData.groups = comparisonData.groups.filter((group) => (group.codesA || []).length || (group.codesB || []).length);
+  draggedComparisonCode = null;
+  selectedComparisonMove = null;
+  renderComparison();
+}
+
+async function compareWorkbooks() {
+  const fileA = els.coderAWorkbook.files?.[0];
+  const fileB = els.coderBWorkbook.files?.[0];
+  if (!fileA || !fileB) {
+    alert("Choose both QualCodeDesk Excel exports first.");
+    return;
+  }
+  els.compareWorkbooksButton.disabled = true;
+  els.compareWorkbooksButton.textContent = "Aligning…";
+  try {
+    const [workbookA, workbookB] = await Promise.all([fileToBase64(fileA), fileToBase64(fileB)]);
+    const response = await fetch("/api/compare-codebooks", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workbookA, workbookB, useGpt: els.useGptAlignment.checked }),
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || "Workbook comparison failed.");
+    comparisonData = payload;
+    const firstParticipant = payload.participantComparisons?.[0]?.participantId;
+    if (!firstParticipant) throw new Error("The workbooks do not contain any shared participant IDs.");
+    activateComparisonParticipant(firstParticipant);
+  } catch (error) {
+    console.error(error);
+    alert(error.message || "Could not compare the workbooks.");
+  } finally {
+    els.compareWorkbooksButton.disabled = false;
+    els.compareWorkbooksButton.textContent = "Align workbooks";
+  }
+}
+
+function downloadComparisonCsv() {
+  if (!comparisonData) return;
+  const quote = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const rows = [["participant_id", "coder_a", "codes_a", "coder_b", "codes_b", "merged_label", "accepted", "similarity", "review_note"]];
+  (comparisonData.participantComparisons || []).forEach((comparison) => comparison.groups.forEach((group) => rows.push([
+    comparison.participantId, comparisonData.coderA, (group.codesA || []).join(" | "), comparisonData.coderB, (group.codesB || []).join(" | "), group.label, group.accepted ? "yes" : "no",
+    group.similarity, group.reason,
+  ])));
+  const blob = new Blob([rows.map((row) => row.map(quote).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "coder_reconciliation.csv";
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
 
 function uid(prefix = "id") {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
@@ -538,6 +1045,36 @@ function collectReusableCodes() {
     .filter(Boolean))];
 }
 
+function collectAvailableCodes() {
+  const optionsByKey = new Map();
+
+  const addOption = (code, description = "") => {
+    const normalizedCode = String(code || "").trim();
+    if (!normalizedCode) return;
+    const key = normalizeCodeKey(normalizedCode);
+    if (!key) return;
+
+    const existing = optionsByKey.get(key);
+    if (!existing) {
+      optionsByKey.set(key, {
+        code: normalizedCode,
+        description: String(description || "").trim(),
+      });
+      return;
+    }
+
+    if (!existing.description && description) {
+      existing.description = String(description).trim();
+    }
+  };
+
+  state.annotations.forEach((item) => addOption(item.code, item.memo));
+  (state.generatedCodeHistory || []).forEach((item) => addOption(item.code, item.rationale));
+  (state.generatedCodeSuggestions || []).forEach((item) => addOption(item.code, item.rationale));
+
+  return [...optionsByKey.values()].sort((a, b) => a.code.localeCompare(b.code));
+}
+
 function collectSpecialHighlights(transcript, suggestions) {
   if (!transcript || !transcript.text) return [];
 
@@ -733,8 +1270,7 @@ async function openSettings() {
     if (!response.ok) throw new Error(`Settings endpoint returned HTTP ${response.status}.`);
     runtimeSettings = await response.json();
     els.recordingsFolderInput.value = runtimeSettings.recordingsFolder || "";
-    els.emptyRecordingsFolder.textContent = runtimeSettings.recordingsFolder || runtimeSettings.defaultRecordingsFolder || "recordings/";
-    els.defaultRecordingsFolderHint.textContent = `Default: ${runtimeSettings.defaultRecordingsFolder || "recordings/"}`;
+    els.defaultRecordingsFolderHint.textContent = `Default: ${runtimeSettings.defaultRecordingsFolder || "QualCodeDesk/recordings"}`;
     els.openaiKeyStatus.textContent = runtimeSettings.openaiConfigured ? "A key is configured." : "No key is configured.";
     els.deepgramKeyStatus.textContent = runtimeSettings.deepgramConfigured ? "A key is configured." : "No key is configured.";
     setStatus("Settings open");
@@ -746,20 +1282,6 @@ async function openSettings() {
     els.openaiKeyStatus.textContent = "Server settings unavailable until restart.";
     els.deepgramKeyStatus.textContent = "Server settings unavailable until restart.";
     setStatus("Restart server for settings");
-  }
-}
-
-async function loadRuntimeSettings() {
-  try {
-    const response = await fetch("/api/settings");
-    if (!response.ok) throw new Error(`Settings endpoint returned HTTP ${response.status}.`);
-    runtimeSettings = await response.json();
-    els.emptyRecordingsFolder.textContent = runtimeSettings.recordingsFolder
-      || runtimeSettings.defaultRecordingsFolder
-      || "recordings/";
-  } catch (error) {
-    console.warn("Could not load the recordings folder path.", error);
-    els.emptyRecordingsFolder.textContent = "recordings/ (inside this repository)";
   }
 }
 
@@ -787,7 +1309,6 @@ async function saveSettings() {
     persistLocal();
     saveSession(true);
     runtimeSettings = { ...runtimeSettings, ...payload };
-    els.emptyRecordingsFolder.textContent = payload.recordingsFolder || runtimeSettings.defaultRecordingsFolder || "recordings/";
     closeSettings();
     if (payload.recordingsFolder !== previousFolder) await refreshRecordings();
     setStatus("Settings saved");
@@ -1131,18 +1652,6 @@ function renderReader() {
   els.reader.innerHTML = chunks.join("");
 }
 
-function renderSuggestions() {
-  const codes = [...new Set(
-    state.annotations
-      .map((item) => item.code)
-      .filter(Boolean)
-  )].sort((a, b) => a.localeCompare(b));
-  els.codeSuggestions.innerHTML = codes.map((code) => {
-    const description = reusableDescription(code);
-    return `<option value="${escapeHtml(code)}"${description ? ` label="${escapeHtml(description)}"` : ""}></option>`;
-  }).join("");
-}
-
 function reusableDescription(code) {
   const key = normalizeCodeKey(code);
   if (!key) return null;
@@ -1162,6 +1671,83 @@ function restoreDescriptionForCode() {
   } else if (!state.editingId) {
     els.memoInput.value = "";
   }
+}
+
+function buildCodeOptionMarkup(option, isActive) {
+  const description = option.description || reusableDescription(option.code) || "";
+  return `
+    <button
+      class="code-suggestion-item ${isActive ? "is-active" : ""}"
+      type="button"
+      data-code-option="${escapeHtml(option.code)}"
+    >
+      <strong>${escapeHtml(option.code)}</strong>
+      <small>${escapeHtml(description || "Use this existing code")}</small>
+    </button>
+  `;
+}
+
+function renderCodeSuggestionsDropdown() {
+  const query = String(els.codeInput.value || "").trim().toLowerCase();
+  const availableCodes = collectAvailableCodes();
+  filteredCodeOptions = availableCodes.filter((option) => {
+    if (!query) return true;
+    const haystack = `${option.code} ${option.description || ""}`.toLowerCase();
+    return haystack.includes(query);
+  });
+
+  if (!filteredCodeOptions.length) {
+    activeCodeOptionIndex = -1;
+    els.codeSuggestionsList.innerHTML = query
+      ? `<div class="code-suggestion-empty">No matching code yet. Press Enter or click Apply code to create "${escapeHtml(els.codeInput.value.trim())}".</div>`
+      : '<div class="code-suggestion-empty">No existing codes yet. Start typing to create one.</div>';
+    return;
+  }
+
+  if (activeCodeOptionIndex >= filteredCodeOptions.length) {
+    activeCodeOptionIndex = filteredCodeOptions.length - 1;
+  }
+
+  els.codeSuggestionsList.innerHTML = filteredCodeOptions
+    .map((option, index) => buildCodeOptionMarkup(option, index === activeCodeOptionIndex))
+    .join("");
+}
+
+function renderSuggestions() {
+  renderCodeSuggestionsDropdown();
+}
+
+function openCodeSuggestions() {
+  renderCodeSuggestionsDropdown();
+  els.codeInput.setAttribute("aria-expanded", "true");
+}
+
+function closeCodeSuggestions() {
+  els.codeInput.setAttribute("aria-expanded", "false");
+  activeCodeOptionIndex = -1;
+}
+
+function selectCodeOption(code) {
+  els.codeInput.value = String(code || "").trim();
+  els.codeInput.setAttribute("aria-expanded", "true");
+  restoreDescriptionForCode();
+}
+
+function moveCodeOptionHighlight(direction) {
+  openCodeSuggestions();
+  if (!filteredCodeOptions.length) return;
+
+  if (direction === "down") {
+    activeCodeOptionIndex = activeCodeOptionIndex < filteredCodeOptions.length - 1
+      ? activeCodeOptionIndex + 1
+      : 0;
+  } else {
+    activeCodeOptionIndex = activeCodeOptionIndex > 0
+      ? activeCodeOptionIndex - 1
+      : filteredCodeOptions.length - 1;
+  }
+
+  renderCodeSuggestionsDropdown();
 }
 
 function renderAnnotations() {
@@ -1252,6 +1838,7 @@ function chooseRange(range) {
   const transcript = activeTranscript();
   if (!transcript || !range || !range.quote.trim()) return;
   state.selectedAiSuggestionIndex = null;
+  closeCodeSuggestions();
   if (state.editingId) {
     const annotation = state.annotations.find((item) => item.id === state.editingId);
     if (!annotation) return;
@@ -1290,6 +1877,7 @@ function editAnnotation(id) {
   const annotation = state.annotations.find((item) => item.id === id);
   if (!annotation) return;
   state.selectedAiSuggestionIndex = null;
+  closeCodeSuggestions();
   state.editingId = id;
   state.selectedRange = {
     start: annotation.start,
@@ -1422,6 +2010,7 @@ function finishCodeEdit(status) {
   state.selectedAiSuggestionIndex = null;
   state.editingId = null;
   state.selectedRange = null;
+  closeCodeSuggestions();
   els.selectedQuote.value = "Highlight text in the transcript.";
   els.selectedQuote.readOnly = true;
   els.highlightEditHint.hidden = true;
@@ -1570,6 +2159,7 @@ function deleteCurrentCode() {
   state.annotations = state.annotations.filter((item) => item.id !== state.editingId);
   state.editingId = null;
   state.selectedRange = null;
+  closeCodeSuggestions();
   els.selectedQuote.value = "Highlight text in the transcript.";
   els.selectedQuote.readOnly = true;
   els.highlightEditHint.hidden = true;
@@ -1877,6 +2467,7 @@ function selectAiSuggestion(suggestionIndex, matchedRange = null) {
 
   state.selectedAiSuggestionIndex = suggestionIndex;
   els.codeInput.value = suggestion.code;
+  closeCodeSuggestions();
   els.memoInput.value = reusableDescription(suggestion.code) || suggestion.rationale || suggestion.evidence || "";
   state.selectedRange = null;
   state.editingId = null;
@@ -1999,8 +2590,44 @@ els.annotationTable.addEventListener("click", (event) => {
 });
 
 els.applyCode.addEventListener("click", applyCode);
-els.codeInput.addEventListener("input", restoreDescriptionForCode);
+els.codeInput.addEventListener("focus", openCodeSuggestions);
+els.codeInput.addEventListener("input", () => {
+  activeCodeOptionIndex = -1;
+  restoreDescriptionForCode();
+  openCodeSuggestions();
+});
 els.codeInput.addEventListener("change", restoreDescriptionForCode);
+els.codeInput.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveCodeOptionHighlight("down");
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveCodeOptionHighlight("up");
+    return;
+  }
+  if (event.key === "Enter" && activeCodeOptionIndex >= 0) {
+    event.preventDefault();
+    selectCodeOption(filteredCodeOptions[activeCodeOptionIndex]?.code || "");
+    return;
+  }
+  if (event.key === "Escape") {
+    activeCodeOptionIndex = -1;
+    renderCodeSuggestionsDropdown();
+  }
+});
+els.codeDropdownToggle.addEventListener("click", () => {
+  openCodeSuggestions();
+  els.codeInput.focus();
+});
+els.codeSuggestionsList.addEventListener("mousedown", (event) => {
+  event.preventDefault();
+  const option = event.target.closest("[data-code-option]");
+  if (!option) return;
+  selectCodeOption(option.dataset.codeOption);
+});
 els.coderIdInput.addEventListener("input", () => {
   state.coderId = els.coderIdInput.value.trim();
   els.coderIdInput.classList.toggle("is-required", !state.coderId);
@@ -2010,7 +2637,6 @@ els.coderIdInput.addEventListener("input", () => {
 els.includePreviousSentence.addEventListener("click", () => expandHighlightToNeighbor("previous"));
 els.includeNextSentence.addEventListener("click", () => expandHighlightToNeighbor("next"));
 els.settingsButton.addEventListener("click", openSettings);
-els.emptyStateSettingsButton.addEventListener("click", openSettings);
 els.closeSettingsButton.addEventListener("click", closeSettings);
 els.cancelSettingsButton.addEventListener("click", closeSettings);
 els.saveSettingsButton.addEventListener("click", saveSettings);
@@ -2028,12 +2654,167 @@ els.loadSessionButton.addEventListener("click", () => {
 els.sessionFileInput.addEventListener("change", () => loadSessionFile(els.sessionFileInput.files?.[0]));
 els.sampleButton.addEventListener("click", loadSampleSession);
 els.exportButton.addEventListener("click", exportExcel);
+els.workspaceTabs.forEach((button) => button.addEventListener("click", () => selectWorkspaceTab(button.dataset.workspaceTab)));
+els.collapseSidebarButton.addEventListener("click", () => setSidebarCollapsed(true));
+els.restoreSidebarButton.addEventListener("click", () => setSidebarCollapsed(false));
+els.coderASessionInput.addEventListener("change", () => { els.coderASessionName.textContent = els.coderASessionInput.files?.[0]?.name || "Choose a .session.json file"; });
+els.coderBSessionInput.addEventListener("change", () => { els.coderBSessionName.textContent = els.coderBSessionInput.files?.[0]?.name || "Choose a .session.json file"; });
+els.loadSessionComparisonButton.addEventListener("click", loadSessionComparison);
+els.sessionParticipantTabs.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-session-participant]");
+  if (!button) return;
+  sessionComparison.activeParticipantId = button.dataset.sessionParticipant;
+  renderSessionComparisonParticipant();
+});
+els.sessionTranscriptA.addEventListener("click", (event) => showSessionCodeBubble(event, "A"));
+els.sessionTranscriptB.addEventListener("click", (event) => showSessionCodeBubble(event, "B"));
+[els.sessionBubbleA, els.sessionBubbleB].forEach((bubble) => bubble.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-choose-session-code]");
+  if (button) chooseSessionAnnotation(button.dataset.chooseSessionSide, button.dataset.chooseSessionCode);
+}));
+let syncingSessionScroll = false;
+function syncSessionTranscriptScroll(source, target) {
+  if (syncingSessionScroll) return;
+  syncingSessionScroll = true;
+  const sourceMax = Math.max(1, source.scrollHeight - source.clientHeight);
+  const targetMax = Math.max(0, target.scrollHeight - target.clientHeight);
+  target.scrollTop = (source.scrollTop / sourceMax) * targetMax;
+  requestAnimationFrame(() => { syncingSessionScroll = false; });
+}
+els.sessionTranscriptA.addEventListener("scroll", () => syncSessionTranscriptScroll(els.sessionTranscriptA, els.sessionTranscriptB));
+els.sessionTranscriptB.addEventListener("scroll", () => syncSessionTranscriptScroll(els.sessionTranscriptB, els.sessionTranscriptA));
+els.acceptSessionDecision.addEventListener("click", acceptSessionDecision);
+els.downloadFinalSessionButton.addEventListener("click", downloadFinalSession);
+els.downloadFinalExcelButton.addEventListener("click", downloadFinalExcel);
+els.acceptedSessionDecisions.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-remove-session-decision]");
+  if (!button) return;
+  sessionComparison.accepted = sessionComparison.accepted.filter((item) => item.id !== button.dataset.removeSessionDecision);
+  renderAcceptedSessionDecisions();
+});
+els.coderAWorkbook.addEventListener("change", () => { els.coderAFileName.textContent = els.coderAWorkbook.files?.[0]?.name || "Choose a QualCodeDesk Excel export"; });
+els.coderBWorkbook.addEventListener("change", () => { els.coderBFileName.textContent = els.coderBWorkbook.files?.[0]?.name || "Choose a QualCodeDesk Excel export"; });
+els.compareWorkbooksButton.addEventListener("click", compareWorkbooks);
+els.downloadComparisonButton.addEventListener("click", downloadComparisonCsv);
+els.comparisonParticipantTabs.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-comparison-participant]");
+  if (button) activateComparisonParticipant(button.dataset.comparisonParticipant);
+});
+els.comparisonTableBody.addEventListener("click", (event) => {
+  const acceptButton = event.target.closest("button[data-accept-row-index]");
+  if (acceptButton && comparisonData) {
+    const group = comparisonData.groups[Number(acceptButton.dataset.acceptRowIndex)];
+    if (group && !group.accepted && !String(group.label || "").trim()) {
+      alert("Enter a merged label before accepting this row.");
+      return;
+    }
+    if (group) group.accepted = !group.accepted;
+    selectedComparisonMove = null;
+    renderComparison();
+    return;
+  }
+  const moveButton = event.target.closest("button[data-move-code]");
+  if (moveButton) {
+    const scrollTop = els.comparisonTableWrap.scrollTop;
+    selectedComparisonMove = {
+      code: moveButton.dataset.moveCode,
+      side: moveButton.dataset.moveSide,
+      groupIndex: Number(moveButton.dataset.moveGroupIndex),
+    };
+    renderComparison();
+    els.comparisonTableWrap.scrollTop = scrollTop;
+    return;
+  }
+  const moveHereButton = event.target.closest("button[data-move-here-index]");
+  if (moveHereButton && selectedComparisonMove) {
+    moveComparisonCode(Number(moveHereButton.dataset.moveHereIndex));
+    return;
+  }
+  const row = event.target.closest("tr[data-comparison-index]");
+  const choice = event.target.closest("button[data-label-value]");
+  if (!row || !choice || !comparisonData) return;
+  const group = comparisonData.groups[Number(row.dataset.comparisonIndex)];
+  group.label = choice.dataset.labelValue;
+  if (group.accepted) {
+    group.accepted = false;
+    renderComparison();
+  } else {
+    row.querySelector(".merged-label-input").value = group.label;
+  }
+});
+els.cancelComparisonMove.addEventListener("click", () => {
+  const scrollTop = els.comparisonTableWrap.scrollTop;
+  selectedComparisonMove = null;
+  renderComparison();
+  els.comparisonTableWrap.scrollTop = scrollTop;
+});
+els.moveComparisonToNewGroup.addEventListener("click", () => moveComparisonCode(null));
+els.comparisonTableBody.addEventListener("input", (event) => {
+  const row = event.target.closest("tr[data-comparison-index]");
+  if (!row || !event.target.matches(".merged-label-input") || !comparisonData) return;
+  const group = comparisonData.groups[Number(row.dataset.comparisonIndex)];
+  group.label = event.target.value.trim();
+  if (group.accepted) {
+    group.accepted = false;
+    row.classList.remove("is-accepted");
+    const button = row.querySelector(".accept-row-button");
+    button.classList.remove("is-accepted");
+    button.textContent = "Accept row";
+  }
+});
+els.comparisonTableBody.addEventListener("dragstart", (event) => {
+  const codeButton = event.target.closest(".draggable-code");
+  if (!codeButton) return;
+  draggedComparisonCode = {
+    code: codeButton.dataset.code,
+    side: codeButton.dataset.side,
+    groupIndex: Number(codeButton.dataset.groupIndex),
+  };
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", codeButton.dataset.code);
+  codeButton.classList.add("is-dragging");
+});
+els.comparisonTableBody.addEventListener("dragend", (event) => {
+  event.target.closest(".draggable-code")?.classList.remove("is-dragging");
+  document.querySelectorAll(".is-drag-over").forEach((node) => node.classList.remove("is-drag-over"));
+  draggedComparisonCode = null;
+});
+els.comparisonTableBody.addEventListener("dragover", (event) => {
+  const cell = event.target.closest(".code-drop-cell");
+  if (!cell || !draggedComparisonCode || cell.dataset.dropSide !== draggedComparisonCode.side) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  cell.classList.add("is-drag-over");
+});
+els.comparisonTableBody.addEventListener("dragleave", (event) => {
+  const cell = event.target.closest(".code-drop-cell");
+  if (cell && !cell.contains(event.relatedTarget)) cell.classList.remove("is-drag-over");
+});
+els.comparisonTableBody.addEventListener("drop", (event) => {
+  const cell = event.target.closest(".code-drop-cell");
+  if (!cell || !draggedComparisonCode || cell.dataset.dropSide !== draggedComparisonCode.side) return;
+  event.preventDefault();
+  moveComparisonCode(Number(cell.dataset.dropGroupIndex));
+});
+els.newComparisonGroupDropzone.addEventListener("dragover", (event) => {
+  if (!draggedComparisonCode) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  els.newComparisonGroupDropzone.classList.add("is-drag-over");
+});
+els.newComparisonGroupDropzone.addEventListener("dragleave", () => els.newComparisonGroupDropzone.classList.remove("is-drag-over"));
+els.newComparisonGroupDropzone.addEventListener("drop", (event) => {
+  if (!draggedComparisonCode) return;
+  event.preventDefault();
+  moveComparisonCode(null);
+});
 els.finishSetupButton.addEventListener("click", () => finishSetup(false));
 els.useDefaultSetupButton.addEventListener("click", () => finishSetup(true));
 
 els.cancelSelection.addEventListener("click", () => {
   state.selectedRange = null;
   state.editingId = null;
+  closeCodeSuggestions();
   els.selectedQuote.value = "Highlight text in the transcript.";
   els.selectedQuote.readOnly = true;
   els.highlightEditHint.hidden = true;
@@ -2058,13 +2839,13 @@ document.addEventListener("keydown", (event) => {
 });
 
 async function init() {
+  setSidebarCollapsed(localStorage.getItem(sidebarCollapsedKey) === "true", false);
   restoreLocal();
   els.deleteCode.hidden = true;
   renderAll();
   initCollapsibleSections();
   renderSectionState("transcripts", true);
   renderSectionState("recordings", true);
-  await loadRuntimeSettings();
   await loadDefaultTranscripts();
   await loadDefaultRecordings();
   await promptForSavedSession();
