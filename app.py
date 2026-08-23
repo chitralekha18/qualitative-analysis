@@ -118,8 +118,8 @@ DEFAULT_TOPICS = [
 XLSX_NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 
-def read_codes_xlsx(raw_bytes):
-    """Read the Codes sheet produced by QualCodeDesk without third-party packages."""
+def read_first_sheet_xlsx(raw_bytes):
+    """Read the first worksheet without third-party packages."""
     try:
         with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
             shared = []
@@ -145,12 +145,19 @@ def read_codes_xlsx(raw_bytes):
             values.append(value)
         table.append(values)
     if not table:
-        raise ValueError("The Codes sheet is empty.")
+        raise ValueError("The first worksheet is empty.")
     headers = [str(value).strip() for value in table[0]]
+    return [dict(zip(headers, row + [""] * (len(headers) - len(row)))) for row in table[1:]]
+
+
+def read_codes_xlsx(raw_bytes):
+    """Read the Codes sheet produced by QualCodeDesk without third-party packages."""
+    rows = read_first_sheet_xlsx(raw_bytes)
+    headers = set(rows[0]) if rows else set()
     required = {"participant_id", "coder_id", "code"}
     if not required.issubset(headers):
         raise ValueError("Expected a QualCodeDesk Codes sheet with participant_id, coder_id, and code columns.")
-    return [dict(zip(headers, row + [""] * (len(headers) - len(row)))) for row in table[1:]]
+    return rows
 
 
 def summarize_coder_rows(rows):
@@ -1014,6 +1021,58 @@ def write_xlsx(path, annotations, topics=None):
         workbook_zip.writestr("xl/worksheets/sheet2.xml", make_sheet(codebook_rows, [30, 72, 20, 26], codebook_row_styles))
 
 
+def make_single_sheet_xlsx(rows, sheet_name="Themes", widths=None):
+    """Create a compact one-sheet workbook using the app's existing XML writer."""
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        '</Types>'
+    )
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        '</Relationships>'
+    )
+    workbook = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<sheets><sheet name="{escape(sheet_name)}" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+    workbook_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+        '</Relationships>'
+    )
+    styles = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="2"><font><sz val="11"/><name val="Aptos"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Aptos"/></font></fonts>'
+        '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF2F6F5E"/><bgColor indexed="64"/></patternFill></fill></fills>'
+        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center"/></xf></cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '</styleSheet>'
+    )
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as workbook_zip:
+        workbook_zip.writestr("[Content_Types].xml", content_types)
+        workbook_zip.writestr("_rels/.rels", root_rels)
+        workbook_zip.writestr("xl/workbook.xml", workbook)
+        workbook_zip.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        workbook_zip.writestr("xl/styles.xml", styles)
+        workbook_zip.writestr("xl/worksheets/sheet1.xml", make_sheet(rows, widths))
+    return output.getvalue()
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -1120,6 +1179,15 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/compare-codebooks":
             self.handle_compare_codebooks()
+            return
+        if parsed.path == "/api/theme-workbooks":
+            self.handle_theme_workbooks()
+            return
+        if parsed.path == "/api/export-themes":
+            self.handle_export_themes()
+            return
+        if parsed.path == "/api/load-theme-workbook":
+            self.handle_load_theme_workbook()
             return
         self.send_error(404, "Not found")
 
@@ -1324,6 +1392,201 @@ class Handler(SimpleHTTPRequestHandler):
             "mixedCoderWarning": len(coders_a) > 1 or len(coders_b) > 1,
             "participantComparisons": participant_comparisons,
         })
+
+    def handle_theme_workbooks(self):
+        payload = self.read_json()
+        workbooks = payload.get("workbooks") or []
+        if not isinstance(workbooks, list) or not workbooks:
+            self.send_json({"ok": False, "error": "Choose at least one QualCodeDesk Excel workbook."})
+            return
+        aggregated = {}
+        loaded_files = []
+        try:
+            for index, workbook in enumerate(workbooks):
+                filename = str(workbook.get("name") or f"Workbook {index + 1}")
+                raw = base64.b64decode(workbook.get("data", ""), validate=True)
+                rows = read_codes_xlsx(raw)
+                loaded_files.append(filename)
+                for row in rows:
+                    code = str(row.get("code", "")).strip()
+                    if not code:
+                        continue
+                    key = code.casefold()
+                    item = aggregated.setdefault(key, {
+                        "code": code,
+                        "count": 0,
+                        "participants": set(),
+                        "quotes": [],
+                    })
+                    participant_id = str(row.get("participant_id", "")).strip()
+                    quote = str(row.get("quote", "")).strip()
+                    item["count"] += 1
+                    if participant_id:
+                        item["participants"].add(participant_id)
+                    item["quotes"].append({
+                        "participantId": participant_id,
+                        "quote": quote,
+                        "coderId": str(row.get("coder_id", "")).strip(),
+                        "description": str(row.get("description", "")).strip(),
+                        "workbook": filename,
+                    })
+        except (ValueError, TypeError) as error:
+            self.send_json({"ok": False, "error": str(error)})
+            return
+        codes = []
+        for item in aggregated.values():
+            item["participants"] = sorted(item["participants"])
+            codes.append(item)
+        codes.sort(key=lambda item: item["code"].casefold())
+        self.send_json({"ok": True, "files": loaded_files, "codes": codes})
+
+    def handle_export_themes(self):
+        payload = self.read_json()
+        source_rows = payload.get("rows") or []
+        if not isinstance(source_rows, list) or not source_rows:
+            self.send_json({"ok": False, "error": "There are no codes to export."})
+            return
+        rows = [[
+            "record_type",
+            "theme",
+            "group_path",
+            "group",
+            "code",
+            "code_quote_count",
+            "participant_id",
+            "quote",
+            "coder_id",
+            "source_workbook",
+            "theme_id",
+            "theme_name",
+            "parent_theme_id",
+            "theme_x",
+            "theme_y",
+            "theme_width",
+            "theme_height",
+            "code_id",
+            "code_x",
+            "code_y",
+            "group_id",
+        ]]
+        for theme in payload.get("themes") or []:
+            rows.append([
+                "theme", "", "", "", "", "", "", "", "", "",
+                theme.get("id", ""), theme.get("name", ""), theme.get("parentId", ""), theme.get("x", ""), theme.get("y", ""), theme.get("width", ""), theme.get("height", ""),
+                "", "", "", "",
+            ])
+        for item in source_rows:
+            rows.append([
+                item.get("recordType", "code_evidence"),
+                item.get("theme", ""),
+                item.get("groupPath", ""),
+                item.get("group", ""),
+                item.get("code", ""),
+                item.get("codeQuoteCount", 0),
+                item.get("participantId", ""),
+                item.get("quote", ""),
+                item.get("coderId", ""),
+                item.get("sourceWorkbook", ""),
+                "", "", "", "", "", "", "",
+                item.get("codeId", ""),
+                item.get("codeX", ""),
+                item.get("codeY", ""),
+                item.get("groupId", ""),
+            ])
+        data = make_single_sheet_xlsx(rows, "Themes", [16, 28, 48, 28, 36, 18, 18, 80, 18, 34, 22, 30, 22, 14, 14, 16, 16, 22, 14, 14, 22])
+        filename = f"qualcodedesk_themes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def handle_load_theme_workbook(self):
+        payload = self.read_json()
+        try:
+            raw = base64.b64decode(payload.get("workbook", ""), validate=True)
+            rows = read_first_sheet_xlsx(raw)
+        except (ValueError, TypeError) as error:
+            self.send_json({"ok": False, "error": str(error)})
+            return
+        if not rows or "code" not in rows[0]:
+            self.send_json({"ok": False, "error": "Expected a Stage 3 theme workbook with theme, group, code, and quote columns."})
+            return
+
+        def number(value, fallback=None):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return fallback
+
+        themes = {}
+        for row in rows:
+            if str(row.get("record_type", "")).strip() != "theme":
+                continue
+            theme_id = str(row.get("theme_id", "")).strip()
+            if theme_id:
+                themes[theme_id] = {
+                    "id": theme_id,
+                    "name": str(row.get("theme_name", "")).strip() or "Untitled theme",
+                    "parentId": str(row.get("parent_theme_id", "")).strip() or None,
+                    "x": number(row.get("theme_x")),
+                    "y": number(row.get("theme_y")),
+                    "width": number(row.get("theme_width")),
+                    "height": number(row.get("theme_height")),
+                }
+
+        path_ids = {}
+        codes = {}
+        files = set()
+        for index, row in enumerate(rows):
+            code_label = str(row.get("code", "")).strip()
+            if not code_label:
+                continue
+            code_id = str(row.get("code_id", "")).strip() or f"restored_code_{len(codes) + 1}"
+            group_id = str(row.get("group_id", "")).strip() or None
+            group_path = str(row.get("group_path", "")).strip()
+            if not group_id and group_path:
+                parent_id = None
+                accumulated = []
+                for name in [part.strip() for part in group_path.split(">") if part.strip()]:
+                    accumulated.append(name)
+                    path_key = " > ".join(accumulated)
+                    if path_key not in path_ids:
+                        generated_id = f"restored_theme_{len(path_ids) + 1}"
+                        path_ids[path_key] = generated_id
+                        themes[generated_id] = {"id": generated_id, "name": name, "parentId": parent_id, "x": None, "y": None}
+                    parent_id = path_ids[path_key]
+                group_id = parent_id
+            item = codes.setdefault(code_id, {
+                "id": code_id,
+                "code": code_label,
+                "count": 0,
+                "participants": set(),
+                "quotes": [],
+                "groupId": group_id,
+                "x": number(row.get("code_x"), 45 + (len(codes) % 7) * 250),
+                "y": number(row.get("code_y"), 55 + (len(codes) // 7) * 86),
+            })
+            participant = str(row.get("participant_id", "")).strip()
+            workbook = str(row.get("source_workbook", "")).strip()
+            item["count"] += 1
+            if participant:
+                item["participants"].add(participant)
+            if workbook:
+                files.add(workbook)
+            item["quotes"].append({
+                "participantId": participant,
+                "quote": str(row.get("quote", "")).strip(),
+                "coderId": str(row.get("coder_id", "")).strip(),
+                "description": "",
+                "workbook": workbook,
+            })
+        output_codes = []
+        for item in codes.values():
+            item["participants"] = sorted(item["participants"])
+            output_codes.append(item)
+        self.send_json({"ok": True, "themes": list(themes.values()), "codes": output_codes, "files": sorted(files)})
 
     def handle_generate_codes(self):
         if not OPENAI_API_KEY:

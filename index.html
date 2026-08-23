@@ -64,6 +64,7 @@
         <nav class="workspace-tabs" aria-label="Workspace">
           <button class="workspace-tab is-active" type="button" data-workspace-tab="coding">1. Code transcripts</button>
           <button class="workspace-tab" type="button" data-workspace-tab="compare">2. Compare coders</button>
+          <button class="workspace-tab" type="button" data-workspace-tab="themes">3. Develop themes</button>
         </nav>
         <div id="codingWorkspace" class="workspace-view">
         <header class="topbar">
@@ -203,6 +204,42 @@
             <span id="coderASessionName"></span><span id="coderBSessionName"></span>
             <input id="coderAWorkbook"><input id="coderBWorkbook"><span id="coderAFileName"></span><span id="coderBFileName"></span><button id="compareWorkbooksButton"></button><input id="useGptAlignment" type="checkbox"><div id="participantAlignment"></div><nav id="comparisonParticipantTabs"></nav><div id="comparisonResults"></div><table><tbody id="comparisonTableBody"></tbody></table><button id="downloadComparisonButton"></button><div id="newComparisonGroupDropzone"></div><div id="comparisonMoveBar"></div><span id="comparisonMoveCode"></span><span id="comparisonMoveCoder"></span><button id="moveComparisonToNewGroup"></button><button id="cancelComparisonMove"></button><div id="comparisonTableWrap"></div>
           </div>
+        </section>
+
+        <section id="themesWorkspace" class="workspace-view themes-workspace" hidden>
+          <header class="themes-toolbar">
+            <div>
+              <strong>Develop themes</strong>
+              <small id="themeWorkbookSummary">Load one or more QualCodeDesk Excel workbooks.</small>
+              <small id="themeAutosaveStatus" class="theme-autosave-status">Autosave ready</small>
+            </div>
+            <label class="theme-workbook-picker">Code workbooks <input id="themeWorkbookInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple></label>
+            <button id="loadThemeWorkbooksButton" class="primary-button" type="button">Add codes</button>
+            <label class="theme-workbook-picker theme-saved-picker">Saved themes <input id="savedThemeWorkbookInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></label>
+            <button id="loadSavedThemeWorkbookButton" class="ghost-button" type="button">Open saved themes</button>
+            <button id="newThemeButton" class="ghost-button" type="button" disabled>New empty theme</button>
+            <button id="downloadThemesExcelButton" class="ghost-button" type="button" disabled>Download theme Excel</button>
+            <button id="showCodesAreaButton" class="ghost-button" type="button">Codes area</button>
+            <button id="showThemeDockButton" class="ghost-button" type="button">Theme area →</button>
+          </header>
+          <section id="themeStageLayout" class="theme-stage-layout">
+            <div id="themeCanvasViewport" class="theme-canvas-viewport">
+              <div id="themeCanvas" class="theme-canvas" aria-label="Theme development canvas">
+                <div class="theme-dock-zone" aria-hidden="true"><strong>Theme-building area</strong><span>New bubbles are organized here. Move bubbles together here to create broader themes.</span></div>
+                <div id="themeCanvasEmpty" class="theme-canvas-empty">
+                  <strong>Your codes will appear here.</strong>
+                  <span>Drag one code near another to create a named theme bubble.</span>
+                </div>
+              </div>
+            </div>
+            <button id="showThemeEvidenceButton" class="theme-evidence-restore" type="button" title="Show code evidence" aria-label="Show code evidence" hidden>‹</button>
+            <aside class="theme-evidence-panel">
+              <header><div><h3>Code evidence</h3><small id="themeEvidenceCount">Select a code</small></div><button id="hideThemeEvidenceButton" class="theme-evidence-toggle" type="button" title="Hide code evidence" aria-label="Hide code evidence">›</button></header>
+              <div id="themeEvidenceBody" class="theme-evidence-body">
+                <p>Click any code on the canvas to see its participant IDs and quotes.</p>
+              </div>
+            </aside>
+          </section>
         </section>
       </section>
     </main>

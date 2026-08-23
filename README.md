@@ -4,9 +4,19 @@ A lightweight, local browser app for manually coding qualitative transcripts. It
 
 This project is built on top of [QualCodeDesk](https://github.com/Dinithipurna/QualCodeDesk).
 
-## Screenshot
+## Screenshots
 
-![Screenshot of the Local Qualitative Coding Platform](https://github.com/user-attachments/assets/4b55f831-651c-4ef2-840c-292545ea3738)
+### Stage 1: Code transcripts
+
+![Stage 1: Code transcripts](assets/stage-1-code-transcripts.png)
+
+### Stage 2: Compare coders
+
+![Stage 2: Compare coders](assets/stage-2-compare-coders.png)
+
+### Stage 3: Develop themes
+
+![Stage 3: Develop themes](assets/stage-3-develop-themes.png)
 
 ## Main changes in this version
 

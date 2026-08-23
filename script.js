@@ -98,6 +98,10 @@ const state = {
 
 const storageKey = "localQualCodingDesk.v2";
 const sidebarCollapsedKey = "localQualCodingDesk.sidebarCollapsed";
+const themeDockX = 1350;
+const themeAutosaveDatabase = "QualCodeDeskThemeAutosave";
+const themeAutosaveStore = "sessions";
+const themeAutosaveKey = "current";
 let runtimeSettings = {};
 let generationProgressTimer = null;
 let filteredCodeOptions = [];
@@ -107,6 +111,9 @@ let draggedComparisonCode = null;
 let selectedComparisonMove = null;
 let activeComparisonParticipantId = null;
 let sessionComparison = { sessionA: null, sessionB: null, participants: [], activeParticipantId: null, candidate: null, accepted: [] };
+let themeState = { files: [], codes: [], themes: [], selectedCodeId: null, selectedThemeId: null, cutCodeId: null, copiedCodeId: null, drag: null };
+let themeAutosaveTimer = null;
+let themeAutosaveReady = false;
 
 const els = {
   appShell: document.querySelector(".app-shell"),
@@ -115,6 +122,25 @@ const els = {
   workspaceTabs: [...document.querySelectorAll("[data-workspace-tab]")],
   codingWorkspace: document.querySelector("#codingWorkspace"),
   compareWorkspace: document.querySelector("#compareWorkspace"),
+  themesWorkspace: document.querySelector("#themesWorkspace"),
+  themeWorkbookInput: document.querySelector("#themeWorkbookInput"),
+  savedThemeWorkbookInput: document.querySelector("#savedThemeWorkbookInput"),
+  loadSavedThemeWorkbookButton: document.querySelector("#loadSavedThemeWorkbookButton"),
+  loadThemeWorkbooksButton: document.querySelector("#loadThemeWorkbooksButton"),
+  themeWorkbookSummary: document.querySelector("#themeWorkbookSummary"),
+  themeAutosaveStatus: document.querySelector("#themeAutosaveStatus"),
+  newThemeButton: document.querySelector("#newThemeButton"),
+  downloadThemesExcelButton: document.querySelector("#downloadThemesExcelButton"),
+  showCodesAreaButton: document.querySelector("#showCodesAreaButton"),
+  showThemeDockButton: document.querySelector("#showThemeDockButton"),
+  themeCanvasViewport: document.querySelector("#themeCanvasViewport"),
+  themeCanvas: document.querySelector("#themeCanvas"),
+  themeCanvasEmpty: document.querySelector("#themeCanvasEmpty"),
+  themeStageLayout: document.querySelector("#themeStageLayout"),
+  hideThemeEvidenceButton: document.querySelector("#hideThemeEvidenceButton"),
+  showThemeEvidenceButton: document.querySelector("#showThemeEvidenceButton"),
+  themeEvidenceCount: document.querySelector("#themeEvidenceCount"),
+  themeEvidenceBody: document.querySelector("#themeEvidenceBody"),
   coderASessionInput: document.querySelector("#coderASessionInput"),
   coderBSessionInput: document.querySelector("#coderBSessionInput"),
   coderASessionName: document.querySelector("#coderASessionName"),
@@ -223,6 +249,97 @@ function selectWorkspaceTab(name) {
   els.workspaceTabs.forEach((button) => button.classList.toggle("is-active", button.dataset.workspaceTab === name));
   els.codingWorkspace.hidden = name !== "coding";
   els.compareWorkspace.hidden = name !== "compare";
+  els.themesWorkspace.hidden = name !== "themes";
+  if (name === "themes" && themeState.codes.length) renderThemeCanvas();
+}
+
+function openThemeAutosaveDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(themeAutosaveDatabase, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(themeAutosaveStore)) request.result.createObjectStore(themeAutosaveStore);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not open theme autosave storage."));
+  });
+}
+
+async function writeThemeAutosave() {
+  if (!themeAutosaveReady || (!themeState.codes.length && !themeState.themes.length)) return;
+  clearTimeout(themeAutosaveTimer);
+  themeAutosaveTimer = null;
+  els.themeAutosaveStatus.textContent = "Saving…";
+  els.themeAutosaveStatus.className = "theme-autosave-status is-saving";
+  try {
+    const database = await openThemeAutosaveDatabase();
+    const snapshot = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      files: [...themeState.files],
+      codes: themeState.codes.map(({ renderWidth, renderHeight, ...code }) => ({
+        ...code,
+        participants: [...(code.participants || [])],
+        quotes: (code.quotes || []).map((quote) => ({ ...quote })),
+      })),
+      themes: themeState.themes.map((theme) => ({ ...theme, manualBounds: theme.manualBounds ? { ...theme.manualBounds } : undefined })),
+    };
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(themeAutosaveStore, "readwrite");
+      transaction.objectStore(themeAutosaveStore).put(snapshot, themeAutosaveKey);
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error || new Error("Theme autosave failed."));
+      transaction.onabort = () => reject(transaction.error || new Error("Theme autosave was interrupted."));
+    });
+    database.close();
+    const time = new Date(snapshot.savedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+    els.themeAutosaveStatus.textContent = `Autosaved ${time}`;
+    els.themeAutosaveStatus.className = "theme-autosave-status";
+  } catch (error) {
+    console.error(error);
+    els.themeAutosaveStatus.textContent = "Autosave unavailable — download a theme Excel backup";
+    els.themeAutosaveStatus.className = "theme-autosave-status is-error";
+  }
+}
+
+function scheduleThemeAutosave() {
+  if (!themeAutosaveReady || (!themeState.codes.length && !themeState.themes.length)) return;
+  clearTimeout(themeAutosaveTimer);
+  themeAutosaveTimer = setTimeout(writeThemeAutosave, 650);
+}
+
+async function restoreThemeAutosave() {
+  try {
+    const database = await openThemeAutosaveDatabase();
+    const snapshot = await new Promise((resolve, reject) => {
+      const transaction = database.transaction(themeAutosaveStore, "readonly");
+      const request = transaction.objectStore(themeAutosaveStore).get(themeAutosaveKey);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error || new Error("Could not read the theme autosave."));
+    });
+    database.close();
+    if (!snapshot?.codes?.length && !snapshot?.themes?.length) return false;
+    themeState = {
+      files: Array.isArray(snapshot.files) ? snapshot.files : [],
+      codes: Array.isArray(snapshot.codes) ? snapshot.codes : [],
+      themes: Array.isArray(snapshot.themes) ? snapshot.themes : [],
+      selectedCodeId: null,
+      selectedThemeId: null,
+      cutCodeId: null,
+      copiedCodeId: null,
+      drag: null,
+    };
+    const saved = snapshot.savedAt ? new Date(snapshot.savedAt) : null;
+    const savedLabel = saved && !Number.isNaN(saved.getTime()) ? saved.toLocaleString() : "an earlier session";
+    els.themeWorkbookSummary.textContent = `Recovered ${themeState.codes.length} codes and ${themeState.themes.length} bubbles from browser autosave`;
+    els.themeAutosaveStatus.textContent = `Recovered autosave from ${savedLabel}`;
+    renderThemeCanvas();
+    return true;
+  } catch (error) {
+    console.error(error);
+    els.themeAutosaveStatus.textContent = "Autosave unavailable — download a theme Excel backup";
+    els.themeAutosaveStatus.className = "theme-autosave-status is-error";
+    return false;
+  }
 }
 
 function setSidebarCollapsed(collapsed, persist = true) {
@@ -504,6 +621,774 @@ function fileToBase64(file) {
     reader.onerror = () => reject(reader.error || new Error("Could not read workbook."));
     reader.readAsDataURL(file);
   });
+}
+
+function themeCodeById(id) {
+  return themeState.codes.find((item) => item.id === id);
+}
+
+function themeById(id) {
+  return themeState.themes.find((item) => item.id === id);
+}
+
+function themeDescendantIds(themeId) {
+  const found = new Set([themeId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    themeState.themes.forEach((item) => {
+      if (item.parentId && found.has(item.parentId) && !found.has(item.id)) {
+        found.add(item.id);
+        changed = true;
+      }
+    });
+  }
+  return found;
+}
+
+function codeCardMetrics(code) {
+  const lines = String(code?.code || "").split(/\r?\n/).reduce((total, line) => total + Math.max(1, Math.ceil(line.length / 24)), 0);
+  return {
+    width: Number(code?.renderWidth) || 210,
+    height: Math.max(Number(code?.renderHeight) || 0, 46, 24 + lines * 18),
+  };
+}
+
+function themeBounds(theme, ignoreManual = false) {
+  const directCodes = themeState.codes.filter((item) => item.groupId === theme.id);
+  const childThemes = themeState.themes.filter((item) => item.parentId === theme.id);
+  const pieces = [
+    ...directCodes.map((item) => ({ x: item.x, y: item.y, ...codeCardMetrics(item) })),
+    ...childThemes.map((item) => themeBounds(item)),
+  ];
+  if (!pieces.length) {
+    const emptyBounds = { x: theme.x ?? 80, y: theme.y ?? 80, width: 280, height: 180 };
+    return !ignoreManual && theme.manualBounds ? { ...theme.manualBounds } : emptyBounds;
+  }
+  const headerSpace = 34 + Math.max(28, Number(theme.nameHeight) || 28);
+  const left = Math.min(...pieces.map((item) => item.x)) - 34;
+  const top = Math.min(...pieces.map((item) => item.y)) - headerSpace;
+  const right = Math.max(...pieces.map((item) => item.x + item.width)) + 34;
+  const bottom = Math.max(...pieces.map((item) => item.y + item.height)) + 30;
+  const naturalBounds = { x: left, y: top, width: Math.max(250, right - left), height: Math.max(150, bottom - top) };
+  return !ignoreManual && theme.manualBounds ? { ...theme.manualBounds } : naturalBounds;
+}
+
+function renderThemeEvidence() {
+  const code = themeCodeById(themeState.selectedCodeId);
+  if (!code) {
+    els.themeEvidenceCount.textContent = "Select a code";
+    els.themeEvidenceBody.innerHTML = "<p>Click any code on the canvas to see its participant IDs and quotes.</p>";
+    return;
+  }
+  els.themeEvidenceCount.textContent = `${code.count} quote${code.count === 1 ? "" : "s"}`;
+  els.themeEvidenceBody.innerHTML = `
+    <h3 class="theme-evidence-code">${escapeHtml(code.code)}</h3>
+    <div class="theme-quote-list">${code.quotes.map((item) => `
+      <article class="theme-quote-card">
+        <strong>Participant ${escapeHtml(item.participantId || "unknown")}</strong>
+        <blockquote>${escapeHtml(item.quote || "No excerpt was stored for this coding row.")}</blockquote>
+        <small>${escapeHtml([item.coderId, item.workbook].filter(Boolean).join(" · "))}</small>
+      </article>`).join("")}</div>`;
+}
+
+function normalizeThemeCanvas() {
+  if (!themeState.codes.length && !themeState.themes.length) return;
+  themeState.codes.forEach(clampAutomaticCodeToCodeArea);
+  const roots = themeState.themes.filter((theme) => !theme.parentId);
+  const codeRects = themeState.codes.map((code) => ({ x: code.x, y: code.y, ...codeCardMetrics(code) }));
+  const themeRects = roots.map((theme) => themeBounds(theme));
+  const rects = [...codeRects, ...themeRects];
+  const margin = 36;
+  const minX = Math.min(...rects.map((rect) => rect.x));
+  const minY = Math.min(...rects.map((rect) => rect.y));
+  const shiftX = minX < margin ? margin - minX : 0;
+  const shiftY = minY < margin ? margin - minY : 0;
+  if (shiftX || shiftY) {
+    themeState.codes.forEach((code) => { code.x += shiftX; code.y += shiftY; });
+    themeState.themes.forEach((theme) => {
+      if (theme.manualBounds) {
+        theme.manualBounds.x += shiftX;
+        theme.manualBounds.y += shiftY;
+      }
+      if (Number.isFinite(theme.x)) theme.x += shiftX;
+      if (Number.isFinite(theme.y)) theme.y += shiftY;
+    });
+    themeState.codes.forEach(clampAutomaticCodeToCodeArea);
+  }
+  const updatedRects = [
+    ...themeState.codes.map((code) => ({ x: code.x, y: code.y, ...codeCardMetrics(code) })),
+    ...roots.map((theme) => themeBounds(theme)),
+  ];
+  const maxX = Math.max(...updatedRects.map((rect) => rect.x + rect.width));
+  const maxY = Math.max(...updatedRects.map((rect) => rect.y + rect.height));
+  els.themeCanvas.style.width = `${Math.max(2400, Math.ceil(maxX + 180))}px`;
+  els.themeCanvas.style.height = `${Math.max(1500, Math.ceil(maxY + 180))}px`;
+}
+
+function setThemeEvidenceCollapsed(collapsed) {
+  els.themeStageLayout.classList.toggle("evidence-is-collapsed", collapsed);
+  els.showThemeEvidenceButton.hidden = !collapsed;
+  els.hideThemeEvidenceButton.setAttribute("aria-expanded", String(!collapsed));
+}
+
+function renderThemeCanvas() {
+  if (!themeState.drag) normalizeThemeCanvas();
+  els.themeCanvasEmpty.hidden = themeState.codes.length > 0;
+  els.newThemeButton.disabled = themeState.codes.length === 0;
+  els.downloadThemesExcelButton.disabled = themeState.codes.length === 0;
+  const themes = [...themeState.themes].sort((a, b) => themeDescendantIds(b.id).size - themeDescendantIds(a.id).size);
+  const themeHtml = themes.map((theme) => {
+    const bounds = themeBounds(theme);
+    const isParent = themeState.themes.some((item) => item.parentId === theme.id);
+    return `<section class="theme-bubble${isParent ? " is-parent" : ""}${theme.id === themeState.selectedThemeId ? " is-selected" : ""}" data-theme-id="${theme.id}" style="left:${bounds.x}px;top:${bounds.y}px;width:${bounds.width}px;height:${bounds.height}px">
+      <div class="theme-bubble-header">
+        <button class="theme-drag-handle" type="button" data-theme-drag="${theme.id}" title="Drag theme bubble" aria-label="Drag theme bubble">⠿</button>
+        <textarea class="theme-bubble-name" data-theme-name="${theme.id}" rows="1" aria-label="Theme name">${escapeHtml(theme.name)}</textarea>
+        <button class="theme-select-target" type="button" data-theme-select="${theme.id}" title="Select this bubble as the paste destination">${theme.id === themeState.selectedThemeId ? "Selected" : "Select"}</button>
+        <button class="theme-bubble-remove" type="button" data-theme-remove="${theme.id}" title="Remove bubble and release its contents">×</button>
+      </div>
+      <button class="theme-resize-handle" type="button" data-theme-resize="${theme.id}" title="Resize bubble" aria-label="Resize bubble">↘</button>
+    </section>`;
+  }).join("");
+  const codeHtml = themeState.codes.map((item) => `<button class="theme-code-card${item.id === themeState.selectedCodeId ? " is-selected" : ""}${item.id === themeState.cutCodeId ? " is-cut" : ""}${item.id === themeState.copiedCodeId ? " is-copied" : ""}" type="button" data-theme-code="${item.id}" style="left:${item.x}px;top:${item.y}px" title="Drag to group; click to view evidence; Command/Ctrl+X to cut; Command/Ctrl+C to copy"><span>${escapeHtml(item.code)}</span><small>${item.count}</small></button>`).join("");
+  els.themeCanvas.querySelectorAll(".theme-bubble,.theme-code-card").forEach((node) => node.remove());
+  els.themeCanvas.insertAdjacentHTML("afterbegin", themeHtml + codeHtml);
+  themeState.themes.forEach((theme) => {
+    const input = els.themeCanvas.querySelector(`[data-theme-name="${CSS.escape(theme.id)}"]`);
+    if (!input) return;
+    input.style.height = "1px";
+    const measuredHeight = Math.max(28, input.scrollHeight);
+    input.style.height = `${measuredHeight}px`;
+    theme.nameHeight = measuredHeight;
+    if (theme.manualBounds) {
+      const natural = themeBounds(theme, true);
+      theme.manualBounds.width = Math.max(theme.manualBounds.width, natural.x + natural.width - theme.manualBounds.x);
+      theme.manualBounds.height = Math.max(theme.manualBounds.height, natural.y + natural.height - theme.manualBounds.y);
+    }
+    refreshThemeBubbleGeometry(theme.id);
+  });
+  if (themeState.needsDockOrganization) {
+    themeState.needsDockOrganization = false;
+    organizeAllThemesInDock();
+    renderThemeCanvas();
+    return;
+  }
+  themeState.codes.forEach((item) => {
+    const node = els.themeCanvas.querySelector(`[data-theme-code="${CSS.escape(item.id)}"]`);
+    if (node) {
+      item.renderWidth = node.offsetWidth;
+      item.renderHeight = node.offsetHeight;
+    }
+  });
+  renderThemeEvidence();
+  scheduleThemeAutosave();
+}
+
+function refreshThemeBubbleGeometry(themeId) {
+  const visited = new Set();
+  let theme = themeById(themeId);
+  while (theme && !visited.has(theme.id)) {
+    visited.add(theme.id);
+    const bounds = themeBounds(theme);
+    const node = els.themeCanvas.querySelector(`[data-theme-id="${CSS.escape(theme.id)}"]`);
+    if (node) {
+      node.style.left = `${bounds.x}px`;
+      node.style.top = `${bounds.y}px`;
+      node.style.width = `${bounds.width}px`;
+      node.style.height = `${bounds.height}px`;
+    }
+    theme = themeById(theme.parentId);
+  }
+}
+
+function addEmptyTheme() {
+  const offset = themeState.themes.length * 24;
+  themeState.themes.push({ id: uid("theme"), name: "New theme", x: 100 + offset, y: 90 + offset, parentId: null });
+  placeThemeInDock(themeState.themes[themeState.themes.length - 1].id);
+  renderThemeCanvas();
+}
+
+function releaseTheme(themeId) {
+  const theme = themeById(themeId);
+  if (!theme) return;
+  themeState.codes.forEach((item) => { if (item.groupId === themeId) item.groupId = theme.parentId || null; });
+  themeState.themes.forEach((item) => { if (item.parentId === themeId) item.parentId = theme.parentId || null; });
+  themeState.themes = themeState.themes.filter((item) => item.id !== themeId);
+  if (themeState.selectedThemeId === themeId) themeState.selectedThemeId = null;
+  compactCodeArea();
+  renderThemeCanvas();
+}
+
+function themeKeyboardTargetIsEditable(target) {
+  return target instanceof Element && Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+}
+
+function cutSelectedThemeCode() {
+  const code = themeCodeById(themeState.selectedCodeId);
+  if (!code) return false;
+  themeState.cutCodeId = code.id;
+  themeState.copiedCodeId = null;
+  renderThemeCanvas();
+  return true;
+}
+
+function copySelectedThemeCode() {
+  const code = themeCodeById(themeState.selectedCodeId);
+  if (!code) return false;
+  themeState.copiedCodeId = code.id;
+  themeState.cutCodeId = null;
+  renderThemeCanvas();
+  return true;
+}
+
+function pasteClipboardCodeIntoSelectedTheme() {
+  const isCopy = Boolean(themeState.copiedCodeId);
+  const source = themeCodeById(themeState.copiedCodeId || themeState.cutCodeId);
+  const target = themeById(themeState.selectedThemeId);
+  if (!source || !target) return false;
+  const code = isCopy ? {
+    ...source,
+    id: uid("theme-code-copy"),
+    participants: [...(source.participants || [])],
+    quotes: (source.quotes || []).map((quote) => ({ ...quote })),
+    renderWidth: undefined,
+    renderHeight: undefined,
+  } : source;
+  const oldGroupId = code.groupId;
+  const destination = themeBounds(target);
+  code.groupId = target.id;
+  code.allowThemeArea = false;
+  code.x = destination.x + 28;
+  code.y = destination.y + 46 + Math.max(28, Number(target.nameHeight) || 28);
+  if (isCopy) themeState.codes.push(code);
+  compactCodesInTheme(target.id);
+  if (!isCopy && oldGroupId && oldGroupId !== target.id) {
+    compactCodesInTheme(oldGroupId);
+    settleThemeLayout(oldGroupId);
+  }
+  settleThemeLayout(target.id);
+  compactCodeArea();
+  themeState.selectedCodeId = code.id;
+  if (!isCopy) themeState.cutCodeId = null;
+  renderThemeCanvas();
+  return true;
+}
+
+function compactCodesInTheme(themeId) {
+  const theme = themeById(themeId);
+  const codes = themeState.codes.filter((item) => item.groupId === themeId).sort((a, b) => a.y - b.y || a.x - b.x);
+  if (!theme || !codes.length) return;
+  const gap = 14;
+  const maxCardWidth = Math.max(...codes.map((code) => codeCardMetrics(code).width));
+  const availableWidth = theme.manualBounds ? Math.max(maxCardWidth, theme.manualBounds.width - 56) : Infinity;
+  const preferredColumns = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(codes.length))));
+  const columns = Math.max(1, Math.min(preferredColumns, Math.floor((availableWidth + gap) / (maxCardWidth + gap)) || 1));
+  const rows = Math.ceil(codes.length / columns);
+  const rowHeights = Array.from({ length: rows }, (_, row) => Math.max(...codes.slice(row * columns, (row + 1) * columns).map((code) => codeCardMetrics(code).height)));
+  const totalWidth = columns * maxCardWidth + (columns - 1) * gap;
+  const totalHeight = rowHeights.reduce((sum, height) => sum + height, 0) + (rows - 1) * gap;
+  const centerX = codes.reduce((sum, code) => sum + code.x + codeCardMetrics(code).width / 2, 0) / codes.length;
+  const centerY = codes.reduce((sum, code) => sum + code.y + codeCardMetrics(code).height / 2, 0) / codes.length;
+  const startX = theme.manualBounds ? theme.manualBounds.x + 28 : Math.max(36, centerX - totalWidth / 2);
+  const startY = theme.manualBounds ? theme.manualBounds.y + 38 + Math.max(28, Number(theme.nameHeight) || 28) : Math.max(70, centerY - totalHeight / 2);
+  let y = startY;
+  for (let row = 0; row < rows; row += 1) {
+    codes.slice(row * columns, (row + 1) * columns).forEach((code, column) => {
+      code.x = startX + column * (maxCardWidth + gap);
+      code.y = y;
+    });
+    y += rowHeights[row] + gap;
+  }
+  if (theme.manualBounds) {
+    const natural = themeBounds(theme, true);
+    const right = Math.max(theme.manualBounds.x + theme.manualBounds.width, natural.x + natural.width);
+    const bottom = Math.max(theme.manualBounds.y + theme.manualBounds.height, natural.y + natural.height);
+    theme.manualBounds.width = right - theme.manualBounds.x;
+    theme.manualBounds.height = bottom - theme.manualBounds.y;
+  }
+}
+
+function createThemeForCodes(codeA, codeB) {
+  if (!codeA || !codeB || codeA.id === codeB.id) return;
+  if (codeB.groupId && codeA.groupId !== codeB.groupId) {
+    codeA.groupId = codeB.groupId;
+    compactCodesInTheme(codeB.groupId);
+    compactCodeArea();
+    return;
+  }
+  if (codeA.groupId && !codeB.groupId) {
+    codeB.groupId = codeA.groupId;
+    compactCodesInTheme(codeA.groupId);
+    compactCodeArea();
+    return;
+  }
+  if (codeA.groupId === codeB.groupId && codeA.groupId) return;
+  const theme = { id: uid("theme"), name: "Name this theme", parentId: null };
+  themeState.themes.push(theme);
+  codeA.groupId = theme.id;
+  codeB.groupId = theme.id;
+  compactCodesInTheme(theme.id);
+  placeThemeInDock(theme.id);
+  compactCodeArea();
+}
+
+function themeAtPoint(x, y, excludedThemeId = null) {
+  const excluded = excludedThemeId ? themeDescendantIds(excludedThemeId) : new Set();
+  const candidates = themeState.themes.filter((item) => !excluded.has(item.id)).map((item) => ({ item, bounds: themeBounds(item) })).filter(({ bounds }) => x >= bounds.x && x <= bounds.x + bounds.width && y >= bounds.y && y <= bounds.y + bounds.height);
+  candidates.sort((a, b) => (a.bounds.width * a.bounds.height) - (b.bounds.width * b.bounds.height));
+  return candidates[0]?.item || null;
+}
+
+function moveThemeContents(themeId, dx, dy) {
+  const descendants = themeDescendantIds(themeId);
+  themeState.codes.forEach((item) => { if (item.groupId && descendants.has(item.groupId)) { item.x += dx; item.y += dy; } });
+  themeState.themes.forEach((item) => {
+    if (descendants.has(item.id) && item.manualBounds) {
+      item.manualBounds.x += dx;
+      item.manualBounds.y += dy;
+    }
+  });
+  const theme = themeById(themeId);
+  if (theme && !themeState.codes.some((item) => item.groupId === themeId) && !themeState.themes.some((item) => item.parentId === themeId)) {
+    theme.x = (theme.x || 80) + dx;
+    theme.y = (theme.y || 80) + dy;
+  }
+}
+
+function placeThemeInDock(themeId) {
+  const theme = themeById(themeId);
+  if (!theme) return;
+  const bounds = themeBounds(theme);
+  const occupied = themeState.themes
+    .filter((item) => item.id !== themeId && !item.parentId)
+    .map((item) => themeBounds(item))
+    .filter((item) => item.x >= themeDockX - 40)
+    .sort((a, b) => a.y - b.y);
+  const targetX = themeDockX + 38;
+  const targetY = occupied.length ? Math.max(...occupied.map((item) => item.y + item.height)) + 34 : 100;
+  moveThemeContents(themeId, targetX - bounds.x, targetY - bounds.y);
+}
+
+function organizeAllThemesInDock() {
+  const roots = themeState.themes.filter((theme) => !theme.parentId).sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  let nextY = 100;
+  roots.forEach((theme) => {
+    const bounds = themeBounds(theme);
+    moveThemeContents(theme.id, themeDockX + 38 - bounds.x, nextY - bounds.y);
+    const movedBounds = themeBounds(theme);
+    nextY = movedBounds.y + movedBounds.height + 34;
+  });
+}
+
+function clampAutomaticCodeToCodeArea(code) {
+  if (code.groupId || code.allowThemeArea) return;
+  const size = codeCardMetrics(code);
+  code.x = Math.min(code.x, themeDockX - size.width - 38);
+}
+
+function organizeUngroupedCodesInCodeArea() {
+  const ungrouped = themeState.codes.filter((code) => !code.groupId);
+  ungrouped.forEach((code) => {
+    code.allowThemeArea = false;
+  });
+  compactCodeArea();
+}
+
+function compactCodeArea() {
+  const codes = themeState.codes.filter((code) => !code.groupId && !code.allowThemeArea).sort((a, b) => a.y - b.y || a.x - b.x || String(a.code).localeCompare(String(b.code)));
+  if (!codes.length) return;
+  const columns = 5;
+  const columnGap = 18;
+  const rowGap = 14;
+  const columnWidth = Math.max(...codes.map((code) => codeCardMetrics(code).width));
+  const rows = Math.ceil(codes.length / columns);
+  const rowHeights = Array.from({ length: rows }, (_, row) => Math.max(...codes.slice(row * columns, (row + 1) * columns).map((code) => codeCardMetrics(code).height)));
+  let y = 55;
+  for (let row = 0; row < rows; row += 1) {
+    codes.slice(row * columns, (row + 1) * columns).forEach((code, column) => {
+      code.x = 45 + column * (columnWidth + columnGap);
+      code.y = y;
+      clampAutomaticCodeToCodeArea(code);
+    });
+    y += rowHeights[row] + rowGap;
+  }
+}
+
+function topThemeFor(theme) {
+  const visited = new Set();
+  let current = theme;
+  while (current?.parentId && !visited.has(current.id)) {
+    visited.add(current.id);
+    current = themeById(current.parentId) || current;
+  }
+  return current;
+}
+
+function separationFrom(rect, obstacle, gap = 22) {
+  const overlaps = rect.x < obstacle.x + obstacle.width + gap
+    && rect.x + rect.width + gap > obstacle.x
+    && rect.y < obstacle.y + obstacle.height + gap
+    && rect.y + rect.height + gap > obstacle.y;
+  if (!overlaps) return null;
+  const choices = [
+    { dx: obstacle.x - rect.x - rect.width - gap, dy: 0 },
+    { dx: obstacle.x + obstacle.width + gap - rect.x, dy: 0 },
+    { dx: 0, dy: obstacle.y - rect.y - rect.height - gap },
+    { dx: 0, dy: obstacle.y + obstacle.height + gap - rect.y },
+  ];
+  return choices.sort((a, b) => (Math.abs(a.dx) + Math.abs(a.dy)) - (Math.abs(b.dx) + Math.abs(b.dy)))[0];
+}
+
+function resolveCodeCollisions(codes, gap = 12) {
+  for (let pass = 0; pass < 10; pass += 1) {
+    let changed = false;
+    for (let leftIndex = 0; leftIndex < codes.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < codes.length; rightIndex += 1) {
+        const left = codes[leftIndex];
+        const right = codes[rightIndex];
+        const leftSize = codeCardMetrics(left);
+        const rightSize = codeCardMetrics(right);
+        const overlapX = Math.min(left.x + leftSize.width, right.x + rightSize.width) - Math.max(left.x, right.x);
+        const overlapY = Math.min(left.y + leftSize.height, right.y + rightSize.height) - Math.max(left.y, right.y);
+        if (overlapX <= -gap || overlapY <= -gap) continue;
+        changed = true;
+        if (overlapX + gap <= overlapY + gap) {
+          const amount = (overlapX + gap) / 2;
+          const direction = left.x < right.x || (left.x === right.x && left.id < right.id) ? -1 : 1;
+          left.x = Math.max(4, left.x + direction * amount);
+          right.x = Math.max(4, right.x - direction * amount);
+        } else {
+          const amount = (overlapY + gap) / 2;
+          const direction = left.y < right.y || (left.y === right.y && left.id < right.id) ? -1 : 1;
+          left.y = Math.max(4, left.y + direction * amount);
+          right.y = Math.max(4, right.y - direction * amount);
+        }
+      }
+    }
+    codes.forEach(clampAutomaticCodeToCodeArea);
+    if (!changed) break;
+  }
+}
+
+function resolveCodesWithinTheme(themeId) {
+  themeState.themes.filter((theme) => theme.parentId === themeId).forEach((theme) => resolveCodesWithinTheme(theme.id));
+  resolveCodeCollisions(themeState.codes.filter((code) => code.groupId === themeId), 14);
+}
+
+function makeRoomForTheme(themeId) {
+  const changedTheme = themeById(themeId);
+  const source = topThemeFor(changedTheme);
+  if (!source) return;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const obstacle = themeBounds(source);
+    themeState.codes.filter((code) => !code.groupId).forEach((code) => {
+      const rect = { x: code.x, y: code.y, ...codeCardMetrics(code) };
+      const shift = separationFrom(rect, obstacle, 24);
+      if (shift) {
+        if (rect.x + shift.dx < 4) Object.assign(shift, { dx: obstacle.x + obstacle.width + 24 - rect.x, dy: 0 });
+        if (rect.y + shift.dy < 4) Object.assign(shift, { dx: 0, dy: obstacle.y + obstacle.height + 24 - rect.y });
+        code.x = Math.max(4, code.x + shift.dx);
+        code.y = Math.max(4, code.y + shift.dy);
+        clampAutomaticCodeToCodeArea(code);
+      }
+    });
+    themeState.themes.filter((theme) => !theme.parentId && theme.id !== source.id).forEach((theme) => {
+      const bounds = themeBounds(theme);
+      const shift = separationFrom(bounds, obstacle, 28);
+      if (shift) {
+        if (bounds.x + shift.dx < 4) Object.assign(shift, { dx: obstacle.x + obstacle.width + 28 - bounds.x, dy: 0 });
+        if (bounds.y + shift.dy < 4) Object.assign(shift, { dx: 0, dy: obstacle.y + obstacle.height + 28 - bounds.y });
+        moveThemeContents(theme.id, shift.dx, shift.dy);
+      }
+    });
+  }
+}
+
+function settleThemeLayout(themeId) {
+  const changedTheme = themeById(themeId);
+  const source = topThemeFor(changedTheme);
+  if (!source) return;
+  for (let pass = 0; pass < 4; pass += 1) {
+    resolveCodesWithinTheme(source.id);
+    makeRoomForTheme(source.id);
+    resolveCodeCollisions(themeState.codes.filter((code) => !code.groupId), 14);
+    makeRoomForTheme(source.id);
+  }
+}
+
+function maybeNestTheme(themeId) {
+  const source = themeById(themeId);
+  if (!source || source.parentId) return;
+  const sourceBounds = themeBounds(source);
+  const centerX = sourceBounds.x + sourceBounds.width / 2;
+  const centerY = sourceBounds.y + sourceBounds.height / 2;
+  const other = themeState.themes.find((item) => item.id !== themeId && !item.parentId && (() => {
+    const bounds = themeBounds(item);
+    const dx = centerX - (bounds.x + bounds.width / 2);
+    const dy = centerY - (bounds.y + bounds.height / 2);
+    return Math.hypot(dx, dy) < Math.max(180, (sourceBounds.width + bounds.width) * 0.34);
+  })());
+  if (!other) return;
+  const parent = { id: uid("theme"), name: "Name this broader theme", parentId: null };
+  themeState.themes.push(parent);
+  source.parentId = parent.id;
+  other.parentId = parent.id;
+  settleThemeLayout(parent.id);
+}
+
+function finishCodeThemeDrag(code, originalGroupId = null, originalGroupBounds = null) {
+  const codeSize = codeCardMetrics(code);
+  const centerX = code.x + codeSize.width / 2;
+  const centerY = code.y + codeSize.height / 2;
+  const targetTheme = themeAtPoint(centerX, centerY);
+  if (targetTheme) {
+    code.groupId = targetTheme.id;
+    compactCodesInTheme(targetTheme.id);
+    compactCodeArea();
+    settleThemeLayout(targetTheme.id);
+    return;
+  }
+  const nearest = themeState.codes.filter((item) => item.id !== code.id).map((item) => ({ item, distance: Math.hypot(item.x - code.x, item.y - code.y) })).sort((a, b) => a.distance - b.distance)[0];
+  if (nearest && nearest.distance < 135) {
+    createThemeForCodes(code, nearest.item);
+    if (code.groupId) settleThemeLayout(code.groupId);
+    return;
+  }
+  if (originalGroupId && originalGroupBounds && centerX >= originalGroupBounds.x && centerX <= originalGroupBounds.x + originalGroupBounds.width && centerY >= originalGroupBounds.y && centerY <= originalGroupBounds.y + originalGroupBounds.height) {
+    code.groupId = originalGroupId;
+    settleThemeLayout(originalGroupId);
+    return;
+  }
+  if (originalGroupId) settleThemeLayout(originalGroupId);
+}
+
+async function loadThemeWorkbooks() {
+  const files = [...(els.themeWorkbookInput.files || [])];
+  if (!files.length) {
+    alert("Choose one or more QualCodeDesk Excel workbooks first.");
+    return;
+  }
+  els.loadThemeWorkbooksButton.disabled = true;
+  els.loadThemeWorkbooksButton.textContent = "Loading…";
+  try {
+    const workbooks = await Promise.all(files.map(async (file) => ({ name: file.name, data: await fileToBase64(file) })));
+    const response = await fetch("/api/theme-workbooks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workbooks }) });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || "Could not load workbooks.");
+    const existingByLabel = new Map(themeState.codes.map((code) => [String(code.code).trim().toLocaleLowerCase(), code]));
+    const startY = themeState.codes.length ? Math.max(...themeState.codes.map((code) => code.y)) + 140 : 55;
+    let addedCount = 0;
+    const addedCodes = [];
+    payload.codes.forEach((item) => {
+      const key = String(item.code).trim().toLocaleLowerCase();
+      const existing = existingByLabel.get(key);
+      if (existing) {
+        const evidenceKeys = new Set(existing.quotes.map((quote) => [quote.participantId, quote.quote, quote.coderId, quote.workbook].join("\u241f")));
+        item.quotes.forEach((quote) => {
+          const evidenceKey = [quote.participantId, quote.quote, quote.coderId, quote.workbook].join("\u241f");
+          if (!evidenceKeys.has(evidenceKey)) {
+            existing.quotes.push(quote);
+            evidenceKeys.add(evidenceKey);
+          }
+        });
+        existing.count = existing.quotes.length;
+        existing.participants = [...new Set(existing.quotes.map((quote) => quote.participantId).filter(Boolean))].sort();
+      } else {
+        const code = { ...item, id: uid("theme_code"), groupId: null, x: 45 + (addedCount % 5) * 250, y: startY + Math.floor(addedCount / 5) * 86 };
+        themeState.codes.push(code);
+        addedCodes.push(code);
+        existingByLabel.set(key, code);
+        addedCount += 1;
+      }
+    });
+    themeState.files = [...new Set([...themeState.files, ...payload.files])];
+    resolveCodeCollisions(addedCodes, 14);
+    els.themeWorkbookSummary.textContent = `${themeState.codes.length} unique codes from ${themeState.files.length} workbook${themeState.files.length === 1 ? "" : "s"}${addedCount ? ` · ${addedCount} new` : " · evidence updated"}`;
+    renderThemeCanvas();
+  } catch (error) {
+    console.error(error);
+    alert(error.message || "Could not load the selected workbooks.");
+  } finally {
+    els.loadThemeWorkbooksButton.disabled = false;
+    els.loadThemeWorkbooksButton.textContent = "Add codes";
+  }
+}
+
+async function loadSavedThemeWorkbook() {
+  const file = els.savedThemeWorkbookInput.files?.[0];
+  if (!file) {
+    alert("Choose a previously downloaded Stage 3 theme workbook first.");
+    return;
+  }
+  if (themeState.codes.length && !window.confirm("Opening a saved theme workbook will replace the current canvas. Download the current theme Excel first if you need to keep it. Continue?")) return;
+  els.loadSavedThemeWorkbookButton.disabled = true;
+  els.loadSavedThemeWorkbookButton.textContent = "Opening…";
+  try {
+    const workbook = await fileToBase64(file);
+    const response = await fetch("/api/load-theme-workbook", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workbook }) });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || "Could not open the saved theme workbook.");
+    const restoredThemes = payload.themes.map((theme) => {
+      const x = theme.x !== null && theme.x !== "" ? Number(theme.x) : undefined;
+      const y = theme.y !== null && theme.y !== "" ? Number(theme.y) : undefined;
+      const width = theme.width !== null && theme.width !== "" ? Number(theme.width) : undefined;
+      const height = theme.height !== null && theme.height !== "" ? Number(theme.height) : undefined;
+      return {
+        ...theme,
+        parentId: theme.parentId || null,
+        ...(Number.isFinite(width) && Number.isFinite(height) && Number.isFinite(x) && Number.isFinite(y)
+          ? { manualBounds: { x, y, width, height } }
+          : { x: Number.isFinite(x) ? x : undefined, y: Number.isFinite(y) ? y : undefined }),
+      };
+    });
+    themeState = {
+      files: payload.files?.length ? payload.files : [file.name],
+      codes: payload.codes.map((code) => ({ ...code, x: Number(code.x), y: Number(code.y), groupId: code.groupId || null })),
+      themes: restoredThemes,
+      selectedCodeId: null,
+      selectedThemeId: null,
+      cutCodeId: null,
+      copiedCodeId: null,
+      drag: null,
+      needsDockOrganization: true,
+    };
+    organizeUngroupedCodesInCodeArea();
+    els.themeWorkbookSummary.textContent = `Restored ${themeState.codes.length} codes and ${themeState.themes.length} theme bubble${themeState.themes.length === 1 ? "" : "s"} from ${file.name}`;
+    renderThemeCanvas();
+  } catch (error) {
+    console.error(error);
+    alert(error.message || "Could not open the saved theme workbook.");
+  } finally {
+    els.loadSavedThemeWorkbookButton.disabled = false;
+    els.loadSavedThemeWorkbookButton.textContent = "Open saved themes";
+  }
+}
+
+function themePathForCode(code) {
+  const path = [];
+  const visited = new Set();
+  let current = themeById(code.groupId);
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    path.unshift(String(current.name || "Untitled theme").trim() || "Untitled theme");
+    current = themeById(current.parentId);
+  }
+  return path;
+}
+
+async function downloadThemesExcel() {
+  try {
+    const rows = [];
+    themeState.codes.forEach((code) => {
+      const path = themePathForCode(code);
+      const evidence = code.quotes.length ? code.quotes : [{}];
+      evidence.forEach((item) => rows.push({
+        recordType: "code_evidence",
+        theme: path[0] || "",
+        groupPath: path.join(" > "),
+        group: path[path.length - 1] || "",
+        code: code.code,
+        codeQuoteCount: code.count,
+        participantId: item.participantId || "",
+        quote: item.quote || "",
+        coderId: item.coderId || "",
+        sourceWorkbook: item.workbook || "",
+        codeId: code.id,
+        codeX: code.x,
+        codeY: code.y,
+        groupId: code.groupId || "",
+      }));
+    });
+    const themes = themeState.themes.map((theme) => ({ id: theme.id, name: theme.name, parentId: theme.parentId || "", x: theme.manualBounds?.x ?? theme.x ?? "", y: theme.manualBounds?.y ?? theme.y ?? "", width: theme.manualBounds?.width ?? "", height: theme.manualBounds?.height ?? "" }));
+    const response = await fetch("/api/export-themes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rows, themes }) });
+    if (!response.ok) throw new Error("Theme Excel export failed.");
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "qualcodedesk_themes.xlsx";
+    downloadBlob(blob, filename);
+  } catch (error) {
+    console.error(error);
+    alert(error.message || "Could not export the theme workbook.");
+  }
+}
+
+function beginThemePointerDrag(event) {
+  if (event.button !== 0 || event.target.closest("input,textarea,button[data-theme-remove]")) return;
+  const codeNode = event.target.closest("[data-theme-code]");
+  const resizeNode = event.target.closest("[data-theme-resize]");
+  const headerNode = event.target.closest("[data-theme-drag]");
+  if (!codeNode && !headerNode && !resizeNode) return;
+  const canvasRect = els.themeCanvas.getBoundingClientRect();
+  const type = codeNode ? "code" : resizeNode ? "resize" : "theme";
+  const id = codeNode?.dataset.themeCode || resizeNode?.dataset.themeResize || headerNode.dataset.themeDrag;
+  const item = type === "code" ? themeCodeById(id) : themeById(id);
+  if (!item) return;
+  const originalGroup = type === "code" ? themeById(item.groupId) : null;
+  const startBounds = type === "code" ? null : themeBounds(item);
+  themeState.drag = { type, id, lastX: event.clientX - canvasRect.left, lastY: event.clientY - canvasRect.top, moved: false, originalGroupId: originalGroup?.id || null, originalGroupBounds: originalGroup ? themeBounds(originalGroup) : null, startBounds: type === "resize" ? startBounds : null, startedInDock: type === "theme" ? startBounds.x + startBounds.width / 2 >= themeDockX : false };
+  event.target.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+}
+
+function moveThemePointerDrag(event) {
+  const drag = themeState.drag;
+  if (!drag) return;
+  const canvasRect = els.themeCanvas.getBoundingClientRect();
+  const x = event.clientX - canvasRect.left;
+  const y = event.clientY - canvasRect.top;
+  const dx = x - drag.lastX;
+  const dy = y - drag.lastY;
+  if (Math.abs(dx) + Math.abs(dy) > 1) {
+    if (!drag.moved && drag.type === "code") {
+      const code = themeCodeById(drag.id);
+      if (code) code.groupId = null;
+    }
+    drag.moved = true;
+  }
+  drag.lastX = x;
+  drag.lastY = y;
+  if (drag.type === "code") {
+    const code = themeCodeById(drag.id);
+    if (code) { code.x = Math.max(4, code.x + dx); code.y = Math.max(4, code.y + dy); }
+  } else if (drag.type === "resize") {
+    const theme = themeById(drag.id);
+    if (theme) {
+      const current = theme.manualBounds || { ...drag.startBounds };
+      const natural = themeBounds(theme, true);
+      const minWidth = Math.max(220, natural.x + natural.width - current.x);
+      const minHeight = Math.max(140, natural.y + natural.height - current.y);
+      theme.manualBounds = { ...current, width: Math.max(minWidth, current.width + dx), height: Math.max(minHeight, current.height + dy) };
+    }
+  } else {
+    moveThemeContents(drag.id, dx, dy);
+  }
+  renderThemeCanvas();
+}
+
+function endThemePointerDrag() {
+  const drag = themeState.drag;
+  if (!drag) return;
+  themeState.drag = null;
+  if (drag.type === "code") {
+    const code = themeCodeById(drag.id);
+    if (!drag.moved) themeState.selectedCodeId = drag.id;
+    else if (code) {
+      const size = codeCardMetrics(code);
+      code.allowThemeArea = code.x + size.width / 2 >= themeDockX;
+      finishCodeThemeDrag(code, drag.originalGroupId, drag.originalGroupBounds);
+      if (!code.groupId) clampAutomaticCodeToCodeArea(code);
+    }
+  } else if (drag.type === "theme" && drag.moved) {
+    const movedTheme = themeById(drag.id);
+    const movedBounds = movedTheme ? themeBounds(movedTheme) : null;
+    if (movedTheme && !movedTheme.parentId && !drag.startedInDock && movedBounds.x + movedBounds.width / 2 >= themeDockX) {
+      placeThemeInDock(drag.id);
+      compactCodeArea();
+    }
+    else maybeNestTheme(drag.id);
+  }
+  renderThemeCanvas();
 }
 
 function renderComparison() {
@@ -2657,6 +3542,54 @@ els.exportButton.addEventListener("click", exportExcel);
 els.workspaceTabs.forEach((button) => button.addEventListener("click", () => selectWorkspaceTab(button.dataset.workspaceTab)));
 els.collapseSidebarButton.addEventListener("click", () => setSidebarCollapsed(true));
 els.restoreSidebarButton.addEventListener("click", () => setSidebarCollapsed(false));
+els.themeWorkbookInput.addEventListener("change", () => {
+  const files = [...(els.themeWorkbookInput.files || [])];
+  els.themeWorkbookSummary.textContent = files.length ? `${files.length} workbook${files.length === 1 ? "" : "s"} selected` : "Load one or more QualCodeDesk Excel workbooks.";
+});
+els.loadThemeWorkbooksButton.addEventListener("click", loadThemeWorkbooks);
+els.loadSavedThemeWorkbookButton.addEventListener("click", loadSavedThemeWorkbook);
+els.newThemeButton.addEventListener("click", addEmptyTheme);
+els.downloadThemesExcelButton.addEventListener("click", downloadThemesExcel);
+els.showCodesAreaButton.addEventListener("click", () => els.themeCanvasViewport.scrollTo({ left: 0, behavior: "smooth" }));
+els.showThemeDockButton.addEventListener("click", () => els.themeCanvasViewport.scrollTo({ left: Math.max(0, themeDockX - 24), behavior: "smooth" }));
+els.hideThemeEvidenceButton.addEventListener("click", () => setThemeEvidenceCollapsed(true));
+els.showThemeEvidenceButton.addEventListener("click", () => setThemeEvidenceCollapsed(false));
+els.themeCanvas.addEventListener("pointerdown", beginThemePointerDrag);
+document.addEventListener("pointermove", moveThemePointerDrag);
+document.addEventListener("pointerup", endThemePointerDrag);
+els.themeCanvas.addEventListener("input", (event) => {
+  const input = event.target.closest("[data-theme-name]");
+  const theme = input ? themeById(input.dataset.themeName) : null;
+  if (theme) {
+    theme.name = input.value;
+    input.style.height = "1px";
+    theme.nameHeight = Math.max(28, input.scrollHeight);
+    input.style.height = `${theme.nameHeight}px`;
+    if (theme.manualBounds) {
+      const natural = themeBounds(theme, true);
+      theme.manualBounds.width = Math.max(theme.manualBounds.width, natural.x + natural.width - theme.manualBounds.x);
+      theme.manualBounds.height = Math.max(theme.manualBounds.height, natural.y + natural.height - theme.manualBounds.y);
+    }
+    refreshThemeBubbleGeometry(theme.id);
+    scheduleThemeAutosave();
+  }
+});
+els.themeCanvas.addEventListener("focusout", (event) => {
+  const input = event.target.closest("[data-theme-name]");
+  const theme = input ? themeById(input.dataset.themeName) : null;
+  if (theme) settleThemeLayout(theme.id);
+  if (input) renderThemeCanvas();
+});
+els.themeCanvas.addEventListener("click", (event) => {
+  const select = event.target.closest("[data-theme-select]");
+  if (select) {
+    themeState.selectedThemeId = select.dataset.themeSelect;
+    renderThemeCanvas();
+    return;
+  }
+  const remove = event.target.closest("[data-theme-remove]");
+  if (remove) releaseTheme(remove.dataset.themeRemove);
+});
 els.coderASessionInput.addEventListener("change", () => { els.coderASessionName.textContent = els.coderASessionInput.files?.[0]?.name || "Choose a .session.json file"; });
 els.coderBSessionInput.addEventListener("change", () => { els.coderBSessionName.textContent = els.coderBSessionInput.files?.[0]?.name || "Choose a .session.json file"; });
 els.loadSessionComparisonButton.addEventListener("click", loadSessionComparison);
@@ -2832,10 +3765,36 @@ els.clearButton.addEventListener("click", () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (!els.themesWorkspace.hidden && !themeKeyboardTargetIsEditable(event.target)) {
+    const key = event.key.toLowerCase();
+    if ((event.metaKey || event.ctrlKey) && key === "x" && cutSelectedThemeCode()) {
+      event.preventDefault();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && key === "c" && copySelectedThemeCode()) {
+      event.preventDefault();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && key === "v" && pasteClipboardCodeIntoSelectedTheme()) {
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "Escape" && (themeState.cutCodeId || themeState.copiedCodeId)) {
+      themeState.cutCodeId = null;
+      themeState.copiedCodeId = null;
+      renderThemeCanvas();
+      event.preventDefault();
+      return;
+    }
+  }
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
     event.preventDefault();
     applyCode();
   }
+});
+
+window.addEventListener("pagehide", () => {
+  if (themeAutosaveTimer) writeThemeAutosave();
 });
 
 async function init() {
@@ -2849,6 +3808,8 @@ async function init() {
   await loadDefaultTranscripts();
   await loadDefaultRecordings();
   await promptForSavedSession();
+  await restoreThemeAutosave();
+  themeAutosaveReady = true;
   if (!state.setupComplete) {
     showSetupModal();
   }
